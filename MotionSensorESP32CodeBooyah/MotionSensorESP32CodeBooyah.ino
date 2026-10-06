@@ -23,7 +23,8 @@ void setup()
 unsigned long lastTimeBatteryWasChecked=0;
 void loop()
 {
-  if(millis()-lastTimeBatteryWasChecked>30000){ // batteri balade
+  if(millis()-lastTimeBatteryWasChecked>30000)
+  { // batteri balade
     uint16_t lvl = myCodeCell.BatteryLevelRead();
     Serial.print("Battery: ");
     Serial.print(lvl);
@@ -32,12 +33,11 @@ void loop()
   }
 
 
-    if (myCodeCell.Run(10)) {  //Run every 10Hz
+    if (myCodeCell.Run(10)) 
+    {  //Run every 10Hz
     
     }
-    
 
     //Hvis man stejler på sit skateboard:
     delay(delayBetweenHIDReports);
-
 }

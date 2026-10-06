@@ -3,18 +3,14 @@
 
 CodeCell myCodeCell;
 
-float x = 0.0;
-float y = 0.0;
-float z = 0.0;
-
-
+float x, y, z, dx, dy, dz {0.0};
 
 constexpr int delayBetweenHIDReports = 5; // Additional delay in milliseconds between HID reports
 
 void setup()
 {
     Serial.begin(115200);
-    myCodeCell.Init(MOTION_ACCELEROMETER); // starter bevægelses ting  
+    myCodeCell.Init(MOTION_LINEAR_ACC); // starter bevægelses ting  
     Serial.print("STARTET");
 }
 
@@ -32,13 +28,13 @@ void loop()
   }
   if (myCodeCell.Run(10)) 
   {  //Run every 10Hz
-
-  }
-  Serial.print("\nx: ");
-  Serial.print(x);
-  Serial.print("\ny: ");
-  Serial.print(y);
-  Serial.print("\nz: ");
-  Serial.print(z);
+    myCodeCell.Motion_LinearAccRead(dx, dy, dz);
+  } 
+  x += dx;
+  y += dy;
+  z += dz;
+  char buffer[50];
+  sprintf(buffer, "x = %.2f, y = %.2f, z = %.2f\n",dx,dy,dz);
+  Serial.printf(buffer);
   delay(delayBetweenHIDReports);
 }

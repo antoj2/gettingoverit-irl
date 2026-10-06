@@ -26,16 +26,17 @@ void loop()
     Serial.print("%, ");
     lastTimeBatteryWasChecked=millis();
   }
+  
   if (myCodeCell.Run(10)) 
   {  //Run every 10Hz
     myCodeCell.Motion_LinearAccRead(dx, dy, dz);
   } 
-  if ((dx < 0.05) && (dx > -0.05)) {dx=0;}
-  if ((dy < 0.05) && (dy > -0.05)) {dy=0;}
-  if ((dz < 0.05) && (dz > -0.05)) {dz=0;}
+  if ((dx < 0.15) && (dx > -0.15)) {dx=0;}
+  if ((dy < 0.15) && (dy > -0.15)) {dy=0;}
+  if ((dz < 0.15) && (dz > -0.15)) {dz=0;}
   x += dx;
   y += dy;
   z += dz;
-  Serial.printf("x = %.2f, y = %.2f, z = %.2f\r\n", dx, dy, dz);
+  Serial.printf("x = %.2f, y = %.2f, z = %.2f\r\n", x, y, z);
   delay(delayBetweenHIDReports);
 }

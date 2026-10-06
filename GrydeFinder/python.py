@@ -1,27 +1,39 @@
 """
-Robust pot tracker for "Getting Over It" (Wayland / PipeWire capture).
+Pot tracker v2 for "Getting Over It" (Wayland / PipeWire capture).
 
-What is different from a plain cv2.matchTemplate:
+Approach: gradient-ORIENTATION template matching (the idea behind shape-based
+matching in industrial vision / LINE-MOD), instead of raw pixel correlation.
 
-1. LIGHTING: both template and frame are converted to a locally contrast-
-   normalised feature image (subtract local mean, divide by local std).
-   This is mostly an edge/structure map, so colour/brightness shifts matter far less.
+Why it is more robust than cv2.matchTemplate on grey values
+-----------------------------------------------------------
+* Lighting: only the *direction* of image edges is compared, not brightness.
+  Dimmer/brighter/tinted lighting changes edge strength, not edge direction.
+* Occlusion: the template is a set of edge points (outline of the pot).
+  The score is "what fraction of those points land on an image edge with the
+  right direction". If an arm hides 30% of the pot you still score ~70% of
+  normal, instead of the correlation collapsing.  Clutter that is *added*
+  (arms, hammer) does not subtract from the score.
+* Rotation: the edge points are rotated analytically for every angle in
+  -45..+45 deg (coarse steps for searching, fine steps for refinement), so the
+  best angle is the pot's rotation.  Rotation is not "inferred" from anything
+  else - it is simply which rotated template fits best.
+* Motion blur: edges are measured on a downscaled, slightly blurred image and
+  each image edge is "spread" over a small neighbourhood, so a few pixels of
+  smear don't break the match.
+* Precision: coarse-to-fine.  A cheap coarse search finds the pot and rough
+  angle, then a fine search (finer scale, 1.5 deg steps, sub-pixel peak
+  interpolation) polishes position and angle.
 
-2. OCCLUSION: the template is split into overlapping patches. Each patch is
-   matched separately and "votes" for where the pot centre is. Only the best
-   ~60% of the votes at each location are averaged, so arms / hammer covering
-   part of the pot no longer ruin the match.
+Temporal logic (no Kalman filter)
+---------------------------------
+Every frame we search near the last position first.  A confident local match
+is accepted immediately.  Otherwise a whole-screen search runs.  A far-away
+result only replaces the current track if it is clearly better AND is seen in
+consecutive frames (so single-frame spikes are ignored, but real teleports
+are followed after ~2 frames).  When nothing is found we HOLD the last pose for
+a short while instead of jumping to garbage.
 
-3. ROTATION: the template (and its patches) are pre-rotated in ANGLE_STEP
-   increments. The best angle is the estimated pot rotation.
-
-4. TEMPORAL: a constant-velocity Kalman filter predicts where the pot should be.
-   While tracking we only search a window around the prediction (faster, and the
-   pot cannot "teleport"). If a frame has no good match we coast on the
-   prediction, with a search window that grows. Only after MAX_COAST_FRAMES
-   failures do we fall back to a (stricter) whole-screen search.
-
-Keys in the debug window:  q = quit,  t = save debug_frame.png,  r = reset tracker
+Keys: q quit | r reset tracker | t save debug_frame.png | k save raw frame to captures/
 """
 
 import math
@@ -37,62 +49,54 @@ import numpy as np
 # ============================================================
 
 TEMPLATE_FILE = Path("GrydeFinder/pot_template.png")
-
-PROCESS_SCALE = 0.50          # frame + template are downscaled by this for matching
 SHOW_WINDOW = True
 
-# --- appearance / lighting ---------------------------------
-FEATURE_SIGMA = 6.0           # local-normalisation radius (px at process scale)
-FEATURE_EPS = 6.0             # noise floor, stops flat areas being amplified
-
 # --- rotation ----------------------------------------------
-ANGLE_STEP = 15               # degrees between pre-rotated templates (360 must divide evenly)
-ANGLE_SEARCH_STEPS = 2        # while tracking: try last angle +/- this many steps
-GLOBAL_ANGLE_STRIDE = 1       # whole-screen search only tries every Nth angle
+ANGLE_RANGE = (-45.0, 45.0)    # degrees; + = counter-clockwise on screen
+COARSE_ANGLE_STEP = 6.0        # used for searching
+FINE_ANGLE_STEP = 1.5          # used for refinement
+GLOBAL_ANGLE_STRIDE = 2        # whole-screen search tries every Nth coarse angle
+NUM_CANDIDATES = 6             # coarse peaks that the fine stage re-scores (kills false positives)
+LOCAL_ANGLE_SPAN = 24.0        # while tracking: +/- this many degrees around last angle
 
-# --- patches (occlusion robustness) ------------------------
-PATCH_GRID = 4                # PATCH_GRID x PATCH_GRID overlapping patches
-PATCH_FRACTION = 0.35         # patch size relative to the (rotated) template canvas
-MIN_PATCH_COVERAGE = 0.50     # drop patches that are mostly transparent / padding
-MIN_PATCH_STD = 0.20          # drop patches with no structure
-USED_FRACTION = 0.60          # average only the best X of patch scores per location
+# --- scales ------------------------------------------------
+COARSE_TARGET_PX = 64          # coarse level downscales so the template is ~this big
+REFINE_MARGIN_PX = 14          # full-res px the fine step may move the coarse result
 
-# --- acceptance thresholds ---------------------------------
-TRACK_THRESHOLD = 0.35        # while tracking (lower: occlusion is expected)
-GLOBAL_THRESHOLD = 0.55       # to (re)acquire from scratch (higher: no prior to lean on)
+# --- edge features -----------------------------------------
+NUM_BINS = 16                  # orientation bins over 180 deg (must be multiple of 4)
+IMG_BLUR_SIGMA = 0.8           # blur (level px) before gradients: noise / blur tolerance
+MAG_THRESHOLD = 40.0           # min gradient magnitude in image (Sobel units, ~10 grey levels)
+TEMPLATE_MAG_MIN = 40.0        # same for template points
+SPREAD_PX = 3                  # an image edge counts for +/- this/2 px around it
+NEIGHBOR_BIN_WEIGHT = 0.3      # credit for orientation one bin (11.25 deg) off
+TARGET_POINTS = 150            # template points per level (cell size is chosen to reach this)
 
-# --- tracking ----------------------------------------------
-TRACK_RADIUS_PX = 120         # search radius around prediction (full-res px)
-TRACK_GROWTH_PX = 40          # extra radius per coasted frame
-MAX_COAST_FRAMES = 45         # then give up and search the whole screen
-PRIOR_STRENGTH = 0.30         # 0 = ignore prediction inside window, 1 = strongly favour it
-# The camera follows the player, so the pot is usually near the centre.
-# Fractions of the frame (x0, y0, x1, y1) used for the whole-screen search.
-GLOBAL_REGION = (0.10, 0.10, 0.90, 0.90)
+# --- decision thresholds (edge score is the fraction of matched template points, 0..1) ---
+GOOD_SCORE = 0.55              # local match this good is accepted immediately
+LOCAL_MIN = 0.38               # weaker local match accepted as "WEAK" (probably occluded)
+GLOBAL_MIN = 0.50              # whole-screen result must reach this to be considered
+ACQUIRE_SCORE = 0.55           # needed to start tracking from nothing
+FAR_SCORE = 0.62               # needed to jump far from the current track
+FAR_MARGIN = 0.10              # ...and beat the local result by this much
+FAR_SURE_SCORE = 0.72          # a far result this good is followed immediately (no confirmation)
+CONFIRM_FRAMES = 2             # far candidate must be seen this many global searches in a row
 
-# --- Kalman filter -----------------------------------------
-KF_POS_NOISE = 30.0           # process noise on position  (px^2 / s)
-KF_VEL_NOISE = 3.0e5          # process noise on velocity  ((px/s)^2 / s) - pot accelerates hard
-MEAS_NOISE_PX = 6.0           # measurement sigma at score 1.0; grows as score drops
-COAST_VELOCITY_DECAY = 0.92   # per coasted frame, so the estimate doesn't run away
+# --- tracking geometry -------------------------------------
+TRACK_RADIUS_FACTOR = 0.6      # coarse local search radius = this x template size (full-res px)
+FAST_MARGIN_FACTOR = 0.2       # fast path (fine level only) may move this x template size per frame
+FAST_ANGLE_SPAN = 3.0          # ...and rotate this many degrees
+TRACK_GROWTH_FACTOR = 0.25     # extra radius per held frame, x template size
+HOLD_MAX = 20                  # frames to hold the last pose before declaring LOST
+GLOBAL_EVERY = 2               # while the track is weak/held: whole-screen search every N frames
 
 # --- output ------------------------------------------------
-ANGLE_SMOOTHING = 0.5         # 1 = raw angle each frame, lower = smoother
-ANCHOR_UP_PX = 80.0           # full-res px from pot centre to your target point, along the pot's "up"
+ANCHOR_UP_PX = 80.0            # full-res px from pot centre to your point, along the pot's "up"
 
 
 # ============================================================
-# FEATURES
+# HELPERS
 # ============================================================
-
-def make_feature(gray):
-    """Locally contrast-normalised image: roughly zero-mean, lighting independent."""
-    g = gray.astype(np.float32)
-    mu = cv2.GaussianBlur(g, (0, 0), FEATURE_SIGMA)
-    d = g - mu
-    var = cv2.GaussianBlur(d * d, (0, 0), FEATURE_SIGMA)
-    return d / (np.sqrt(var) + FEATURE_EPS)
-
 
 def rot_ccw(dx, dy, deg):
     """Rotate an image-space offset counter-clockwise (as seen on screen) by deg."""
@@ -101,230 +105,451 @@ def rot_ccw(dx, dy, deg):
     return dx * c + dy * s, -dx * s + dy * c
 
 
+def anchor_point(cx, cy, angle_deg):
+    ux, uy = rot_ccw(0.0, -1.0, angle_deg)
+    return cx + ANCHOR_UP_PX * ux, cy + ANCHOR_UP_PX * uy
+
+
+def orientation_bins(gx, gy):
+    ang = np.mod(np.arctan2(gy, gx), np.pi)                   # direction, sign-insensitive
+    return np.floor(ang / np.pi * NUM_BINS + 0.5).astype(np.int32) % NUM_BINS
+
+
+def downscale(gray, k):
+    if k == 1:
+        return gray
+    h, w = gray.shape
+    return cv2.resize(gray, (w // k, h // k), interpolation=cv2.INTER_AREA)
+
+
+def image_maps(gray_u8, k):
+    """
+    Edge-orientation maps of an image (size must be a multiple of k).
+    Returns NUM_BINS/4 float32 images with 4 channels each; channel value is
+    1 where an edge of that orientation is within SPREAD_PX, 0.5 for the
+    neighbouring orientation bin.
+    """
+    g = downscale(gray_u8, k).astype(np.float32)
+    if IMG_BLUR_SIGMA > 0:
+        g = cv2.GaussianBlur(g, (0, 0), IMG_BLUR_SIGMA)
+    gx = cv2.Sobel(g, cv2.CV_32F, 1, 0, ksize=3)
+    gy = cv2.Sobel(g, cv2.CV_32F, 0, 1, ksize=3)
+    mag = cv2.magnitude(gx, gy)
+    bins = orientation_bins(gx, gy)
+    valid = mag > MAG_THRESHOLD
+    kernel = np.ones((SPREAD_PX, SPREAD_PX), np.uint8)
+    spread = []
+    for b in range(NUM_BINS):
+        m = ((bins == b) & valid).astype(np.uint8)
+        spread.append(cv2.dilate(m, kernel).astype(np.float32))
+    soft = []
+    for b in range(NUM_BINS):
+        nb = np.maximum(spread[(b - 1) % NUM_BINS], spread[(b + 1) % NUM_BINS])
+        soft.append(np.maximum(spread[b], nb * NEIGHBOR_BIN_WEIGHT))
+    return [cv2.merge(soft[i:i + 4]) for i in range(0, NUM_BINS, 4)]
+
+
+def subpixel(sm, x, y):
+    """Parabolic peak refinement on a score map."""
+    h, w = sm.shape
+    dx = dy = 0.0
+    if 0 < x < w - 1:
+        a, b, c = sm[y, x - 1], sm[y, x], sm[y, x + 1]
+        den = a - 2 * b + c
+        if den < -1e-9:
+            dx = float(np.clip(0.5 * (a - c) / den, -0.5, 0.5))
+    if 0 < y < h - 1:
+        a, b, c = sm[y - 1, x], sm[y, x], sm[y + 1, x]
+        den = a - 2 * b + c
+        if den < -1e-9:
+            dy = float(np.clip(0.5 * (a - c) / den, -0.5, 0.5))
+    return dx, dy
+
+
 # ============================================================
-# TEMPLATE BANK
+# TEMPLATE LEVELS
 # ============================================================
 
 @dataclass
-class Patch:
-    img: np.ndarray
-    mask: np.ndarray
-    ox: int
-    oy: int
-
-
-@dataclass
-class AngleBank:
+class Bank:
     angle: float
-    size: int
-    patches: list
-    k: int
+    groups: list        # [(group_index, template(hb, wb, 4))]
+    n: int              # number of template points
+    ox: int             # column of the pot centre inside the template array
+    oy: int
+    hb: int
+    wb: int
+    iy: np.ndarray      # point rows / cols / bins inside the template array (for debug)
+    ix: np.ndarray
+    bn: np.ndarray
 
 
 def load_template():
     raw = cv2.imread(str(TEMPLATE_FILE), cv2.IMREAD_UNCHANGED)
     if raw is None:
         raise RuntimeError(f"Could not load template: {TEMPLATE_FILE}")
-
     if raw.ndim == 2:
-        gray = raw
-        alpha = np.full(raw.shape, 255, np.uint8)
+        gray, alpha = raw, np.full(raw.shape, 255, np.uint8)
     elif raw.shape[2] == 4:
         gray = cv2.cvtColor(raw[:, :, :3], cv2.COLOR_BGR2GRAY)
         alpha = raw[:, :, 3]
     else:
         gray = cv2.cvtColor(raw, cv2.COLOR_BGR2GRAY)
         alpha = np.full(gray.shape, 255, np.uint8)
-
-    gray = cv2.resize(gray, None, fx=PROCESS_SCALE, fy=PROCESS_SCALE,
-                      interpolation=cv2.INTER_AREA)
-    alpha = cv2.resize(alpha, None, fx=PROCESS_SCALE, fy=PROCESS_SCALE,
-                       interpolation=cv2.INTER_AREA)
-
-    mask = (alpha > 127).astype(np.float32)
-    mask = cv2.erode(mask, np.ones((3, 3), np.uint8))   # avoid fringe pixels
-    if mask.sum() < 50:
-        raise RuntimeError("Template mask is (almost) empty")
-
-    g = gray.astype(np.float32)
-    g[mask == 0] = g[mask > 0].mean()                    # neutral fill before normalising
-    feat = make_feature(g) * mask
-    return feat, mask
+    return gray, alpha
 
 
-def build_banks(feat_t, mask_t):
-    th, tw = feat_t.shape
-    cs = int(math.ceil(math.hypot(th, tw)))
-    if cs % 2 == 0:
-        cs += 1
+class Level:
+    """Template edge points at one scale (1/k), pre-rotated for a list of angles."""
 
-    canvas_f = np.zeros((cs, cs), np.float32)
-    canvas_m = np.zeros((cs, cs), np.float32)
-    y0, x0 = (cs - th) // 2, (cs - tw) // 2
-    canvas_f[y0:y0 + th, x0:x0 + tw] = feat_t
-    canvas_m[y0:y0 + th, x0:x0 + tw] = mask_t
-    c = (cs - 1) / 2.0
+    def __init__(self, gray_full, alpha_full, k, angles):
+        self.k = k
+        self.angles = list(angles)
+        th, tw = gray_full.shape
+        wl, hl = tw // k, th // k
+        wl -= (wl % 2 == 0)             # odd size -> the centre is a whole pixel
+        hl -= (hl % 2 == 0)
+        x0, y0 = (tw - wl * k) // 2, (th - hl * k) // 2
+        g = downscale(np.ascontiguousarray(gray_full[y0:y0 + hl * k, x0:x0 + wl * k]), k)
+        a = downscale(np.ascontiguousarray(alpha_full[y0:y0 + hl * k, x0:x0 + wl * k]), k)
+        g = g.astype(np.float32)
+        inside = a > 127
+        fill = g[inside].mean() - 40.0   # background gets a definite step so the silhouette is an edge
+        comp = np.where(inside, g, fill).astype(np.float32)
+        if IMG_BLUR_SIGMA > 0:
+            comp = cv2.GaussianBlur(comp, (0, 0), IMG_BLUR_SIGMA)
+        gx = cv2.Sobel(comp, cv2.CV_32F, 1, 0, ksize=3)
+        gy = cv2.Sobel(comp, cv2.CV_32F, 0, 1, ksize=3)
+        mag = cv2.magnitude(gx, gy)
+        phi = np.arctan2(gy, gx)
+        allowed = cv2.dilate(inside.astype(np.uint8), np.ones((3, 3), np.uint8)) > 0
+        mag_a = np.where(allowed, mag, 0.0)
 
-    ps = max(8, int(cs * PATCH_FRACTION))
-    positions = sorted(set(np.linspace(0, cs - ps, PATCH_GRID).astype(int).tolist()))
+        thr = max(TEMPLATE_MAG_MIN, 0.2 * float(np.percentile(mag_a[allowed], 99)))
+        pts = None
+        for cell in (4, 3, 2, 1):
+            pts = self._pick(mag_a, thr, cell)
+            if len(pts[0]) >= TARGET_POINTS:
+                break
+        ys, xs = pts
+        if len(xs) < 12:
+            raise RuntimeError(f"Only {len(xs)} edge points found in the template at scale 1/{k}; "
+                               f"is the template too small/flat?")
+        cx, cy = (wl - 1) / 2.0, (hl - 1) / 2.0
+        self.px, self.py = xs - cx, ys - cy
+        self.phi = phi[ys, xs]
+        self.size_level = (hl, wl)
+        self.banks = [self._bank(a_) for a_ in self.angles]
+        self.max_h = max(b.hb for b in self.banks)
+        self.max_w = max(b.wb for b in self.banks)
 
-    banks = []
-    for angle in range(-180, 180, ANGLE_STEP):
-        M = cv2.getRotationMatrix2D((c, c), angle, 1.0)   # +angle = counter-clockwise
-        rf = cv2.warpAffine(canvas_f, M, (cs, cs), flags=cv2.INTER_LINEAR, borderValue=0)
-        rm = cv2.warpAffine(canvas_m, M, (cs, cs), flags=cv2.INTER_LINEAR, borderValue=0)
-        rm = (rm > 0.5).astype(np.float32)
+    @staticmethod
+    def _pick(mag, thr, cell):
+        h, w = mag.shape
+        ys, xs = [], []
+        for y in range(0, h, cell):
+            for x in range(0, w, cell):
+                blk = mag[y:y + cell, x:x + cell]
+                j = int(np.argmax(blk))
+                if blk.flat[j] > thr:
+                    ys.append(y + j // blk.shape[1])
+                    xs.append(x + j % blk.shape[1])
+        return np.array(ys, np.int32), np.array(xs, np.int32)
 
-        patches = []
-        for oy in positions:
-            for ox in positions:
-                m = rm[oy:oy + ps, ox:ox + ps]
-                if m.mean() < MIN_PATCH_COVERAGE:
-                    continue
-                f = rf[oy:oy + ps, ox:ox + ps]
-                sel = m > 0
-                mean = f[sel].mean()
-                img = ((f - mean) * m).astype(np.float32)
-                if img[sel].std() < MIN_PATCH_STD:
-                    continue
-                patches.append(Patch(np.ascontiguousarray(img),
-                                     np.ascontiguousarray(m), ox, oy))
+    def _bank(self, angle_deg):
+        t = math.radians(angle_deg)
+        c, s = math.cos(t), math.sin(t)
+        rx = self.px * c + self.py * s
+        ry = -self.px * s + self.py * c
+        bn = orientation_bins(np.cos(self.phi - t), np.sin(self.phi - t))
+        ix = np.rint(rx).astype(np.int32)
+        iy = np.rint(ry).astype(np.int32)
+        minx, miny = int(ix.min()), int(iy.min())
+        wb, hb = int(ix.max()) - minx + 1, int(iy.max()) - miny + 1
+        T = np.zeros((NUM_BINS, hb, wb), np.float32)
+        np.add.at(T, (bn, iy - miny, ix - minx), 1.0)
+        groups = []
+        for gi in range(NUM_BINS // 4):
+            sub = T[gi * 4:(gi + 1) * 4]
+            if sub.any():
+                groups.append((gi, np.ascontiguousarray(np.transpose(sub, (1, 2, 0)))))
+        return Bank(angle_deg, groups, len(ix), -minx, -miny, hb, wb,
+                    iy - miny, ix - minx, bn)
 
-        if not patches:
-            raise RuntimeError("No usable template patches - is the template too flat/small?")
-        k = max(1, int(math.ceil(USED_FRACTION * len(patches))))
-        banks.append(AngleBank(float(angle), cs, patches, k))
-    return banks
-
-
-# ============================================================
-# MATCHING
-# ============================================================
-
-def match_bank(feat, bank, prior=None):
-    """
-    Returns (weighted_peak, raw_score, (cx, cy)) in feat coordinates, or None.
-    cx, cy is the centre of the (rotated) template canvas = pot centre.
-    """
-    H, W = feat.shape
-    cs = bank.size
-    Ht, Wt = H - cs + 1, W - cs + 1
-    if Ht < 1 or Wt < 1:
-        return None
-
-    maps = []
-    for p in bank.patches:
-        r = cv2.matchTemplate(feat, p.img, cv2.TM_CCORR_NORMED, mask=p.mask)
-        # Re-align so every patch map is indexed by template top-left.
-        maps.append(r[p.oy:p.oy + Ht, p.ox:p.ox + Wt])
-    stack = np.stack(maps).astype(np.float32)
-    np.nan_to_num(stack, copy=False, nan=0.0, posinf=0.0, neginf=0.0)
-    np.maximum(stack, 0.0, out=stack)
-
-    P = stack.shape[0]
-    k = min(bank.k, P)
-    if k < P:
-        stack = np.partition(stack, P - k, axis=0)[P - k:]
-    raw = np.ascontiguousarray(stack.mean(axis=0), dtype=np.float32)
-
-    half = (cs - 1) / 2.0
-    if prior is not None:
-        px, py, sigma = prior
-        xs = np.arange(Wt, dtype=np.float32) + half - px
-        ys = np.arange(Ht, dtype=np.float32) + half - py
-        g = np.exp(-(ys[:, None] ** 2 + xs[None, :] ** 2) / (2.0 * sigma * sigma))
-        weighted = np.ascontiguousarray(raw * ((1.0 - PRIOR_STRENGTH) + PRIOR_STRENGTH * g),
-                                        dtype=np.float32)
-    else:
-        weighted = raw
-
-    _, wmax, _, loc = cv2.minMaxLoc(weighted)
-    return wmax, float(raw[loc[1], loc[0]]), (loc[0] + half, loc[1] + half)
-
-
-def search(feat, banks, indices, prior=None):
-    best = None
-    for i in indices:
-        res = match_bank(feat, banks[i], prior)
-        if res is None:
-            continue
-        if best is None or res[0] > best[0]:
-            best = (res[0], res[1], res[2], i)
-    return best  # (weighted, raw, (cx, cy), bank_index) or None
+    def search(self, maps, angle_idxs):
+        """Returns a list of (score, angle_idx, (x, y), score_map) - the best peak for each angle."""
+        H, W = maps[0].shape[:2]
+        out = []
+        for ai in angle_idxs:
+            bank = self.banks[ai]
+            if H < bank.hb or W < bank.wb:
+                continue
+            acc = None
+            for gi, T in bank.groups:
+                r = cv2.matchTemplate(maps[gi], T, cv2.TM_CCORR)
+                acc = r if acc is None else acc + r
+            acc *= 1.0 / bank.n
+            _, mx, _, loc = cv2.minMaxLoc(acc)
+            out.append((float(mx), ai, loc, acc))
+        return out
 
 
-def clamp_roi(cx, cy, half_w, half_h, W, H, min_size):
-    half_w = max(half_w, min_size / 2.0 + 2)
-    half_h = max(half_h, min_size / 2.0 + 2)
-    w = int(min(round(2 * half_w), W))
-    h = int(min(round(2 * half_h), H))
-    x0 = int(min(max(round(cx - half_w), 0), W - w))
-    y0 = int(min(max(round(cy - half_h), 0), H - h))
-    return x0, y0, x0 + w, y0 + h
+def top_candidates(level, results, shape, k_peaks, nms_radius):
+    """Collapse per-angle score maps into one centre-indexed map and return its top peaks."""
+    H, W = shape
+    best = np.full((H, W), -1.0, np.float32)
+    best_ai = np.zeros((H, W), np.int32)
+    for score, ai, loc, acc in results:
+        bank = level.banks[ai]
+        h, w = acc.shape
+        view = best[bank.oy:bank.oy + h, bank.ox:bank.ox + w]
+        better = acc > view
+        view[better] = acc[better]
+        best_ai[bank.oy:bank.oy + h, bank.ox:bank.ox + w][better] = ai
+    out = []
+    r = int(max(1, nms_radius))
+    for _ in range(k_peaks):
+        _, mx, _, loc = cv2.minMaxLoc(best)
+        if mx <= 0:
+            break
+        x, y = loc
+        out.append((float(mx), int(best_ai[y, x]), (x, y), best))
+        best[max(0, y - r):y + r + 1, max(0, x - r):x + r + 1] = -1.0
+    return out
 
 
 # ============================================================
-# TRACKING
+# DETECTOR (coarse + fine)
 # ============================================================
 
-class Kalman2D:
-    def __init__(self):
-        self.kf = cv2.KalmanFilter(4, 2)
-        self.kf.measurementMatrix = np.array([[1, 0, 0, 0], [0, 1, 0, 0]], np.float32)
-        self.initialized = False
-
-    def init(self, x, y):
-        self.kf.statePost = np.array([[x], [y], [0], [0]], np.float32)
-        self.kf.errorCovPost = np.eye(4, dtype=np.float32) * 100.0
-        self.initialized = True
-
-    def predict(self, dt):
-        self.kf.transitionMatrix = np.array(
-            [[1, 0, dt, 0], [0, 1, 0, dt], [0, 0, 1, 0], [0, 0, 0, 1]], np.float32)
-        self.kf.processNoiseCov = (
-            np.diag([KF_POS_NOISE, KF_POS_NOISE, KF_VEL_NOISE, KF_VEL_NOISE]) * dt
-        ).astype(np.float32)
-        s = self.kf.predict()
-        return float(s[0, 0]), float(s[1, 0])
-
-    def coast(self):
-        # OpenCV's predict() doesn't feed back into statePost without a correct().
-        self.kf.statePost = self.kf.statePre.copy()
-        self.kf.errorCovPost = self.kf.errorCovPre.copy()
-        self.kf.statePost[2:] *= COAST_VELOCITY_DECAY
-
-    def correct(self, x, y, score):
-        sigma = MEAS_NOISE_PX / max(score, 0.1)
-        self.kf.measurementNoiseCov = (np.eye(2) * sigma * sigma).astype(np.float32)
-        self.kf.correct(np.array([[x], [y]], np.float32))
-
-    def position(self):
-        s = self.kf.statePost
-        return float(s[0, 0]), float(s[1, 0])
+@dataclass
+class Pose:
+    cx: float
+    cy: float
+    angle: float
+    score: float
+    fine_score: float = 0.0
 
 
-class AngleFilter:
-    def __init__(self):
-        self.v = None
+def align_crop(cx, cy, half_w, half_h, W, H, k):
+    x0 = int(max(0, cx - half_w)) // k * k
+    y0 = int(max(0, cy - half_h)) // k * k
+    x1 = int(min(W, cx + half_w)) // k * k
+    y1 = int(min(H, cy + half_h)) // k * k
+    return x0, y0, x1, y1
+
+
+class Detector:
+    def __init__(self, gray_t, alpha_t):
+        th, tw = gray_t.shape
+        self.tsize = float(max(th, tw))
+        self.kc = max(2, int(round(self.tsize / COARSE_TARGET_PX)))
+        self.kf = max(1, int(math.ceil(self.kc / 2)))
+        lo, hi = ANGLE_RANGE
+        self.c_angles = list(np.arange(lo, hi + 1e-6, COARSE_ANGLE_STEP))
+        self.f_angles = list(np.arange(lo, hi + 1e-6, FINE_ANGLE_STEP))
+        self.coarse = Level(gray_t, alpha_t, self.kc, self.c_angles)
+        self.fine = Level(gray_t, alpha_t, self.kf, self.f_angles)
+        self.debug_pts = None   # (x_full, y_full, hit) of the last refinement
+
+    # ---- conversions -------------------------------------------------------
+    @staticmethod
+    def _full(v_level, k, origin):
+        return origin + (v_level + 0.5) * k - 0.5
+
+    def _to_pose(self, level, res, x0, y0):
+        score, ai, loc, acc = res
+        bank = level.banks[ai]
+        sx, sy = subpixel(acc, loc[0], loc[1])
+        cxl = loc[0] + sx + bank.ox
+        cyl = loc[1] + sy + bank.oy
+        return Pose(self._full(cxl, level.k, x0), self._full(cyl, level.k, y0),
+                    bank.angle, score)
+
+    # ---- coarse searches -----------------------------------------------------
+    def _candidates(self, maps, idxs, x0, y0, k_peaks):
+        res = self.coarse.search(maps, idxs)
+        if not res:
+            return []
+        H, W = maps[0].shape[:2]
+        peaks = top_candidates(self.coarse, res, (H, W), k_peaks,
+                               0.35 * self.tsize / self.kc)
+        out = []
+        for score, ai, (x, y), _ in peaks:
+            out.append(Pose(self._full(x, self.kc, x0), self._full(y, self.kc, y0),
+                            self.coarse.banks[ai].angle, score))
+        return out
+
+    def search_global(self, gray, k_peaks=None):
+        """Returns candidate poses (coarse), best first."""
+        H, W = gray.shape
+        k = self.kc
+        x1, y1 = W // k * k, H // k * k
+        maps = image_maps(gray[:y1, :x1], k)
+        idxs = list(range(0, len(self.c_angles), GLOBAL_ANGLE_STRIDE))
+        return self._candidates(maps, idxs, 0, 0, k_peaks or NUM_CANDIDATES)
+
+    def search_local(self, gray, cx, cy, radius, angle, k_peaks=2):
+        H, W = gray.shape
+        k = self.kc
+        half_w = radius + self.coarse.max_w * k / 2.0 + k
+        half_h = radius + self.coarse.max_h * k / 2.0 + k
+        x0, y0, x1, y1 = align_crop(cx, cy, half_w, half_h, W, H, k)
+        if x1 - x0 < k * self.coarse.max_w or y1 - y0 < k * self.coarse.max_h:
+            return []
+        maps = image_maps(gray[y0:y1, x0:x1], k)
+        idxs = [i for i, a in enumerate(self.c_angles) if abs(a - angle) <= LOCAL_ANGLE_SPAN]
+        return self._candidates(maps, idxs, x0, y0, k_peaks)
+
+    def best_of(self, gray, candidates):
+        """Fine-score every coarse candidate; return the best refined pose (score = fine score)."""
+        best = None
+        for c in candidates:
+            p = self.refine(gray, c)
+            if p.fine_score <= 0:
+                continue
+            if best is None or p.fine_score > best[0].fine_score:
+                best = (p, self.debug_pts)
+        if best is None:
+            return None
+        self.debug_pts = best[1]
+        best[0].score = best[0].fine_score
+        return best[0]
+
+    # ---- fine refinement -----------------------------------------------------
+    def refine(self, gray, pose, margin=None, span=None):
+        margin = REFINE_MARGIN_PX if margin is None else margin
+        span = COARSE_ANGLE_STEP if span is None else span
+        H, W = gray.shape
+        k = self.kf
+        lv = self.fine
+        half_w = lv.max_w * k / 2.0 + margin + k
+        half_h = lv.max_h * k / 2.0 + margin + k
+        x0, y0, x1, y1 = align_crop(pose.cx, pose.cy, half_w, half_h, W, H, k)
+        if x1 - x0 < k * lv.max_w or y1 - y0 < k * lv.max_h:
+            return Pose(pose.cx, pose.cy, pose.angle, 0.0, 0.0)
+        maps = image_maps(gray[y0:y1, x0:x1], k)
+        idxs = [i for i, a in enumerate(self.f_angles) if abs(a - pose.angle) <= span]
+        res = lv.search(maps, idxs)
+        if not res:
+            return Pose(pose.cx, pose.cy, pose.angle, 0.0, 0.0)
+        res.sort(key=lambda r: r[1])
+        best = max(res, key=lambda r: r[0])
+        fine = self._to_pose(lv, best, x0, y0)
+        # sub-step angle by parabola over neighbouring angle scores
+        pos = [i for i, r in enumerate(res) if r[1] == best[1]][0]
+        if 0 < pos < len(res) - 1:
+            sm, s0, sp = res[pos - 1][0], res[pos][0], res[pos + 1][0]
+            den = sm - 2 * s0 + sp
+            if den < -1e-9:
+                fine.angle += float(np.clip(0.5 * (sm - sp) / den, -0.5, 0.5)) * FINE_ANGLE_STEP
+        fine.fine_score = fine.score
+        fine.score = fine.fine_score
+        self._debug_hits(lv, best, maps, x0, y0)
+        return fine
+
+    def _debug_hits(self, lv, best, maps, x0, y0):
+        score, ai, loc, acc = best
+        bank = lv.banks[ai]
+        yy, xx = bank.iy + loc[1], bank.ix + loc[0]
+        hit = np.zeros(len(yy), bool)
+        for gi, _ in bank.groups:
+            sel = (bank.bn // 4) == gi
+            if sel.any():
+                vals = maps[gi][yy[sel], xx[sel], bank.bn[sel] % 4]
+                hit[sel] = vals >= 0.5
+        self.debug_pts = (self._full(xx, lv.k, x0), self._full(yy, lv.k, y0), hit)
+
+
+# ============================================================
+# TRACKER (temporal logic)
+# ============================================================
+
+class PotTracker:
+    def __init__(self, det):
+        self.det = det
+        self.reset()
 
     def reset(self):
-        self.v = None
+        self.prev = None
+        self.last = None
+        self.hold = 0
+        self.pending = None      # [Pose, count]
+        self.since_global = 10 ** 6
+        self.status = "LOST"
+        self.local_score = 0.0
 
-    def update(self, deg):
-        r = math.radians(deg)
-        u = np.array([math.cos(r), math.sin(r)])
-        self.v = u if self.v is None else (1 - ANGLE_SMOOTHING) * self.v + ANGLE_SMOOTHING * u
+    def _dist(self, a, b):
+        return math.hypot(a.cx - b.cx, a.cy - b.cy)
 
-    @property
-    def deg(self):
-        if self.v is None:
-            return 0.0
-        return math.degrees(math.atan2(self.v[1], self.v[0]))
+    def _accept(self, gray, pose, status):
+        self.prev = self.last if status in ("TRACKING", "WEAK") else None
+        self.last, self.hold, self.pending = pose, 0, None
+        self.status = status
+        return pose
 
+    def update(self, gray):
+        det = self.det
+        last = self.last
+        T = det.tsize
+        radius = TRACK_RADIUS_FACTOR * T + self.hold * TRACK_GROWTH_FACTOR * T
 
-def anchor_point(cx, cy, angle_deg):
-    ux, uy = rot_ccw(0.0, -1.0, angle_deg)       # pot's "up" in screen space
-    return cx + ANCHOR_UP_PX * ux, cy + ANCHOR_UP_PX * uy
+        local = None
+        if last is not None and self.hold == 0:
+            # fast path: fine level only, around the extrapolated position
+            vx = vy = 0.0
+            if self.prev is not None:
+                lim = 0.5 * T
+                vx = float(np.clip(last.cx - self.prev.cx, -lim, lim))
+                vy = float(np.clip(last.cy - self.prev.cy, -lim, lim))
+            guess = Pose(last.cx + vx, last.cy + vy, last.angle, 0.0)
+            fast = det.refine(gray, guess, margin=FAST_MARGIN_FACTOR * T, span=FAST_ANGLE_SPAN)
+            if fast.score >= GOOD_SCORE:
+                return self._accept(gray, fast, "TRACKING")
+        if last is not None:
+            local = det.best_of(gray, det.search_local(gray, last.cx, last.cy, radius, last.angle))
+        self.local_score = local.score if local else 0.0
+
+        if local is not None and local.score >= GOOD_SCORE:
+            return self._accept(gray, local, "TRACKING")
+
+        glob = None
+        self.since_global += 1
+        if last is None or self.since_global >= GLOBAL_EVERY:
+            glob = det.best_of(gray, det.search_global(gray))
+            self.since_global = 0
+
+            if glob is not None and glob.score >= GLOBAL_MIN:
+                if last is None:
+                    if glob.score >= ACQUIRE_SCORE:
+                        return self._accept(gray, glob, "ACQUIRED")
+                elif self._dist(glob, last) <= radius:
+                    return self._accept(gray, glob, "TRACKING")
+                else:
+                    local_s = local.score if local else 0.0
+                    if glob.score >= FAR_SCORE and glob.score >= local_s + FAR_MARGIN:
+                        if self.pending and self._dist(glob, self.pending[0]) <= 0.6 * T:
+                            self.pending[0], self.pending[1] = glob, self.pending[1] + 1
+                        else:
+                            self.pending = [glob, 1]
+                        if self.pending[1] >= CONFIRM_FRAMES or glob.score >= FAR_SURE_SCORE:
+                            return self._accept(gray, glob, "JUMPED")
+                    else:
+                        self.pending = None
+            else:
+                self.pending = None
+
+        if local is not None and local.score >= LOCAL_MIN:
+            return self._accept(gray, local, "WEAK")
+
+        if last is not None:
+            self.hold += 1
+            if self.hold <= HOLD_MAX:
+                self.status = f"HOLD {self.hold}"
+                return last
+            self.last = None
+        self.status = "LOST"
+        return None
 
 
 # ============================================================
@@ -334,16 +559,13 @@ def anchor_point(cx, cy, angle_deg):
 def main():
     from pipewire_capture import PortalCapture, CaptureStream
 
-    S = PROCESS_SCALE
-    feat_t, mask_t = load_template()
-    th, tw = feat_t.shape
-    banks = build_banks(feat_t, mask_t)
-    n_banks = len(banks)
-    cs = banks[0].size
-    all_idx = list(range(n_banks))
-    global_idx = all_idx[::GLOBAL_ANGLE_STRIDE]
-    print(f"Template {tw}x{th} (process scale), canvas {cs}, "
-          f"{n_banks} angles, ~{len(banks[0].patches)} patches each")
+    gray_t, alpha_t = load_template()
+    det = Detector(gray_t, alpha_t)
+    tracker = PotTracker(det)
+    th, tw = gray_t.shape
+    print(f"Template {tw}x{th}; coarse 1/{det.kc} ({len(det.c_angles)} angles, "
+          f"{det.coarse.banks[0].n} pts), fine 1/{det.kf} ({len(det.f_angles)} angles, "
+          f"{det.fine.banks[0].n} pts)")
 
     print("\nPlease select the Getting Over It window.\n")
     session = PortalCapture().select_window()
@@ -355,13 +577,8 @@ def main():
     stream = CaptureStream(session.fd, session.node_id, session.width, session.height,
                            capture_interval=0)
     stream.start()
-
-    tracker = Kalman2D()
-    angle_filter = AngleFilter()
-    last_idx = None
-    lost = 0
-    score = 0.0
-    t_prev = time.perf_counter()
+    Path("captures").mkdir(exist_ok=True)
+    n_saved = 0
 
     try:
         while True:
@@ -374,109 +591,56 @@ def main():
                 time.sleep(0.001)
                 continue
 
-            now = time.perf_counter()
-            dt = min(max(now - t_prev, 0.001), 0.1)
-            t_prev = now
+            t0 = time.perf_counter()
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGRA2GRAY)
+            pose = tracker.update(gray)
+            ms = (time.perf_counter() - t0) * 1000
 
-            frame_bgr = cv2.cvtColor(frame, cv2.COLOR_BGRA2BGR)
-            small = cv2.resize(frame_bgr, None, fx=S, fy=S, interpolation=cv2.INTER_AREA)
-            feat = make_feature(cv2.cvtColor(small, cv2.COLOR_BGR2GRAY))
-            H, W = feat.shape
-            if H < cs or W < cs:
-                continue
-
-            accepted = None   # (cx_full, cy_full, raw_score, bank_index)
-            tracking_mode = tracker.initialized and lost <= MAX_COAST_FRAMES
-
-            if tracking_mode:
-                px, py = tracker.predict(dt)
-                radius = (TRACK_RADIUS_PX + lost * TRACK_GROWTH_PX) * S
-                cxs, cys = px * S, py * S
-                x0, y0, x1, y1 = clamp_roi(cxs, cys, radius, radius, W, H, cs)
-                if last_idx is None:
-                    idxs = all_idx
-                else:
-                    idxs = [(last_idx + d) % n_banks
-                            for d in range(-ANGLE_SEARCH_STEPS, ANGLE_SEARCH_STEPS + 1)]
-                res = search(feat[y0:y1, x0:x1], banks, idxs,
-                             prior=(cxs - x0, cys - y0, max(radius * 0.5, 10.0)))
-                if res is not None and res[1] >= TRACK_THRESHOLD:
-                    accepted = ((res[2][0] + x0) / S, (res[2][1] + y0) / S, res[1], res[3])
+            if pose is not None:
+                ax, ay = anchor_point(pose.cx, pose.cy, pose.angle)
+                print(f"\r{tracker.status:<9} pot=({pose.cx:7.1f},{pose.cy:7.1f}) "
+                      f"anchor=({ax:7.1f},{ay:7.1f}) angle={pose.angle:+6.1f} "
+                      f"score={pose.score:.2f} {ms:5.1f}ms   ", end="", flush=True)
             else:
-                gx0, gy0, gx1, gy1 = GLOBAL_REGION
-                x0, y0 = int(W * gx0), int(H * gy0)
-                x1, y1 = int(W * gx1), int(H * gy1)
-                x1, y1 = max(x1, x0 + cs), max(y1, y0 + cs)
-                x1, y1 = min(x1, W), min(y1, H)
-                x0, y0 = min(x0, x1 - cs), min(y0, y1 - cs)
-                res = search(feat[y0:y1, x0:x1], banks, global_idx)
-                if res is not None and res[1] >= GLOBAL_THRESHOLD:
-                    accepted = ((res[2][0] + x0) / S, (res[2][1] + y0) / S, res[1], res[3])
-
-            if accepted is not None:
-                mx, my, score, idx = accepted
-                if tracking_mode:
-                    tracker.correct(mx, my, score)
-                else:
-                    tracker.init(mx, my)
-                    angle_filter.reset()
-                lost = 0
-                last_idx = idx
-                angle_filter.update(banks[idx].angle)
-                status = "TRACKING"
-            elif tracking_mode:
-                tracker.coast()
-                lost += 1
-                score = 0.0
-                status = f"COASTING {lost}"
-            else:
-                tracker.initialized = False
-                last_idx = None
-                score = 0.0
-                status = "LOST"
-
-            have_pos = tracker.initialized and lost <= MAX_COAST_FRAMES
-            if have_pos:
-                cx, cy = tracker.position()
-                ang = angle_filter.deg
-                ax, ay = anchor_point(cx, cy, ang)
-                print(f"\r{status:<12} pot=({cx:7.1f},{cy:7.1f}) "
-                      f"anchor=({ax:7.1f},{ay:7.1f}) angle={ang:+6.1f} score={score:.2f}   ",
-                      end="", flush=True)
-            else:
-                print(f"\r{status:<12}" + " " * 70, end="", flush=True)
+                print(f"\r{tracker.status:<9}" + " " * 70, end="", flush=True)
 
             if SHOW_WINDOW:
-                display = frame_bgr.copy()
-                color = ((0, 255, 0) if status == "TRACKING"
-                         else (0, 165, 255) if have_pos else (0, 0, 255))
-                if have_pos:
-                    hw, hh = tw / S / 2, th / S / 2
+                display = cv2.cvtColor(frame, cv2.COLOR_BGRA2BGR)
+                ok = tracker.status in ("TRACKING", "ACQUIRED", "JUMPED")
+                color = ((0, 255, 0) if ok else (0, 165, 255) if pose is not None else (0, 0, 255))
+                if pose is not None:
+                    hw, hh = tw / 2, th / 2
                     corners = []
                     for sx, sy in ((-1, -1), (1, -1), (1, 1), (-1, 1)):
-                        ox, oy = rot_ccw(sx * hw, sy * hh, ang)
-                        corners.append((int(cx + ox), int(cy + oy)))
+                        ox, oy = rot_ccw(sx * hw, sy * hh, pose.angle)
+                        corners.append((int(pose.cx + ox), int(pose.cy + oy)))
                     cv2.polylines(display, [np.array(corners, np.int32)], True, color, 2)
-                    cv2.circle(display, (int(cx), int(cy)), 6, color, -1)
-                    cv2.line(display, (int(cx), int(cy)), (int(ax), int(ay)), color, 2)
+                    cv2.circle(display, (int(pose.cx), int(pose.cy)), 5, color, -1)
+                    cv2.line(display, (int(pose.cx), int(pose.cy)), (int(ax), int(ay)), color, 2)
                     cv2.circle(display, (int(ax), int(ay)), 8, (255, 255, 0), -1)
-                cv2.putText(display, f"{status}  score={score:.2f}", (20, 35),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.8, color, 2)
-                if have_pos:
-                    cv2.putText(display, f"angle={ang:+.0f}", (20, 70),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.8, color, 2)
+                    if det.debug_pts is not None and tracker.status[:4] != "HOLD":
+                        px, py, hit = det.debug_pts      # green = template edge point found, red = missing
+                        for x, y, h in zip(px, py, hit):
+                            cv2.circle(display, (int(x), int(y)), 2,
+                                       (0, 255, 0) if h else (0, 0, 255), -1)
+                cv2.putText(display, f"{tracker.status} score={pose.score if pose else 0:.2f} "
+                                     f"angle={pose.angle if pose else 0:+.0f} {ms:.0f}ms",
+                            (20, 35), cv2.FONT_HERSHEY_SIMPLEX, 0.8, color, 2)
                 cv2.imshow("Getting Over It - Pot Tracker", display)
 
                 key = cv2.waitKey(1) & 0xFF
                 if key == ord("q"):
                     break
                 if key == ord("r"):
-                    tracker.initialized = False
-                    last_idx = None
-                    lost = 0
+                    tracker.reset()
                 if key == ord("t"):
                     cv2.imwrite("debug_frame.png", display)
                     print("\nSaved debug_frame.png")
+                if key == ord("k"):
+                    cv2.imwrite(f"captures/frame_{n_saved:04d}.png",
+                                cv2.cvtColor(frame, cv2.COLOR_BGRA2BGR))
+                    n_saved += 1
+                    print(f"\nSaved captures/frame_{n_saved - 1:04d}.png")
     finally:
         stream.stop()
         session.close()

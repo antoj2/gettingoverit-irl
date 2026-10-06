@@ -1,43 +1,149 @@
-import os
-import cv2
-import mss
-import numpy as np
+#!/usr/bin/env python3
 
-print("XDG_SESSION_TYPE =", os.environ.get("XDG_SESSION_TYPE"))
-print("DISPLAY          =", os.environ.get("DISPLAY"))
-print("WAYLAND_DISPLAY  =", os.environ.get("WAYLAND_DISPLAY"))
+import re
+import dbus
+import dbus.mainloop.glib
 
-with mss.MSS() as sct:
+import gi
+gi.require_version("Gst", "1.0")
 
-    print("\nAvailable monitors:")
+from gi.repository import GLib, Gst
 
-    for i, monitor in enumerate(sct.monitors):
-        print(i, monitor)
+dbus.mainloop.glib.DBusGMainLoop(set_as_default=True)
 
-    print("\nCapturing primary monitor...")
+PORTAL_BUS = "org.freedesktop.portal.Desktop"
+PORTAL_PATH = "/org/freedesktop/portal/desktop"
+SCREENCAST_IFACE = "org.freedesktop.portal.ScreenCast"
+REQUEST_IFACE = "org.freedesktop.portal.Request"
 
-    monitor = sct.primary_monitor
+bus = dbus.SessionBus()
+loop = GLib.MainLoop()
 
-    screenshot = sct.grab(monitor)
+portal = bus.get_object(PORTAL_BUS, PORTAL_PATH)
 
-    image = np.array(screenshot)
+request_counter = 0
+session_counter = 0
 
-    image = cv2.cvtColor(
-        image,
-        cv2.COLOR_BGRA2BGR
+sender_name = re.sub(
+    r"\.",
+    "_",
+    bus.get_unique_name()[1:]
+)
+
+
+def new_request_path():
+    global request_counter
+
+    request_counter += 1
+
+    token = f"u{request_counter}"
+
+    path = (
+        "/org/freedesktop/portal/desktop/request/"
+        f"{sender_name}/{token}"
     )
 
-    cv2.imwrite(
-        "raw_capture.png",
-        image
+    return path, token
+
+
+def new_session_path():
+    global session_counter
+
+    session_counter += 1
+
+    token = f"u{session_counter}"
+
+    path = (
+        "/org/freedesktop/portal/desktop/session/"
+        f"{sender_name}/{token}"
     )
 
-    print(
-        "Saved raw_capture.png:",
-        image.shape
+    return path, token
+
+
+def portal_call(method, callback, *args, options=None):
+    if options is None:
+        options = {}
+
+    request_path, request_token = new_request_path()
+
+    print("Request path:")
+    print(request_path)
+
+    # IMPORTANT:
+    # Register the Response listener BEFORE making the D-Bus call.
+    bus.add_signal_receiver(
+        callback,
+        signal_name="Response",
+        dbus_interface=REQUEST_IFACE,
+        bus_name=PORTAL_BUS,
+        path=request_path,
     )
 
-    print(
-        "MSS performance:",
-        sct.performance_status
+    options["handle_token"] = request_token
+
+    print("Calling portal method...")
+
+    method(
+        *args,
+        dbus.Dictionary(options, signature="sv"),
+        dbus_interface=SCREENCAST_IFACE,
     )
+
+    print("D-Bus method returned.")
+
+
+def create_session_response(response, results):
+    print()
+    print("=" * 60)
+    print("CREATE SESSION RESPONSE")
+    print("=" * 60)
+    print("Response:", response)
+    print("Results:", results)
+
+    if response != 0:
+        print("CreateSession failed.")
+        loop.quit()
+        return
+
+    session = results.get("session_handle")
+
+    print()
+    print("SUCCESS!")
+    print("Session:", session)
+    print()
+    print("The ScreenCast portal is responding correctly.")
+
+    loop.quit()
+
+
+def create_session():
+    session_path, session_token = new_session_path()
+
+    print("Expected session path:")
+    print(session_path)
+    print()
+
+    portal_call(
+        portal.CreateSession,
+        create_session_response,
+        options={
+            "session_handle_token": session_token,
+        },
+    )
+
+
+print("=" * 60)
+print("Wayland Portal D-Bus diagnostic")
+print("=" * 60)
+print()
+
+print("D-Bus sender:", bus.get_unique_name())
+print()
+
+create_session()
+
+try:
+    loop.run()
+except KeyboardInterrupt:
+    print("\nInterrupted.")

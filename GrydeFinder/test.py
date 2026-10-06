@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 
+import time
 import os
 import re
 import signal
@@ -95,74 +96,25 @@ def portal_call(method, callback, *args, options=None):
 # GStreamer
 # ------------------------------------------------------------
 
-def on_new_sample(appsink):
-    global frame_count
-    global first_frame_saved
+frame_count = 0
+start_time = time.time()
 
-    sample = appsink.emit("pull-sample")
+
+def on_new_sample(sink):
+    global frame_count
+
+    sample = sink.emit("pull-sample")
 
     if sample is None:
         return Gst.FlowReturn.ERROR
 
     frame_count += 1
 
-    if frame_count % 60 == 0:
-        print(f"Received {frame_count} frames")
+    elapsed = time.time() - start_time
 
-    if not first_frame_saved:
-
-        first_frame_saved = True
-
-        caps = sample.get_caps()
-        structure = caps.get_structure(0)
-
-        width = structure.get_value("width")
-        height = structure.get_value("height")
-        fmt = structure.get_value("format")
-
-        print()
-        print("=" * 60)
-        print("FIRST FRAME RECEIVED")
-        print("=" * 60)
-
-        print("Width :", width)
-        print("Height:", height)
-        print("Format:", fmt)
-
-        buffer = sample.get_buffer()
-
-        success, map_info = buffer.map(Gst.MapFlags.READ)
-
-        if success:
-
-            try:
-
-                data = bytes(map_info.data)
-
-                print("Buffer bytes:", len(data))
-
-                # We requested RGB below, so this can be written
-                # directly as a PPM image.
-                filename = "wayland_capture.ppm"
-
-                with open(filename, "wb") as f:
-
-                    f.write(
-                        f"P6\n{width} {height}\n255\n".encode()
-                    )
-
-                    f.write(data)
-
-                print()
-                print("Saved:", filename)
-
-                print()
-                print("Open it with:")
-                print("  xdg-open wayland_capture.ppm")
-
-            finally:
-
-                buffer.unmap(map_info)
+    if elapsed >= 2.0:
+        fps = frame_count / elapsed
+        print(f"Frames: {frame_count}   FPS: {fps:.1f}")
 
     return Gst.FlowReturn.OK
 
@@ -205,18 +157,11 @@ def start_gstreamer(node_id, fd):
     print("PipeWire node:", node_id)
 
     pipeline_description = (
-        f"pipewiresrc "
-        f"fd={fd} "
-        f"path={node_id} "
-        f"do-timestamp=true "
-        f"! videoconvert "
-        f"! video/x-raw,format=RGB "
-        f"! appsink "
-        f"name=sink "
-        f"emit-signals=true "
-        f"sync=false "
-        f"max-buffers=1 "
-        f"drop=true"
+        f"pipewiresrc fd={fd} path={node_id} do-timestamp=true "
+        "! videoconvert "
+        "! video/x-raw,format=RGB "
+        "! appsink name=sink emit-signals=true sync=false "
+        "max-buffers=1 drop=true"
     )
 
     print()

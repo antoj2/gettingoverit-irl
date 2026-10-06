@@ -30,11 +30,12 @@ void loop()
   {  //Run every 10Hz
     myCodeCell.Motion_LinearAccRead(dx, dy, dz);
   } 
+  if ((dx < 0.05) && (dx > -0.05)) {dx=0;}
+  if ((dy < 0.05) && (dy > -0.05)) {dy=0;}
+  if ((dz < 0.05) && (dz > -0.05)) {dz=0;}
   x += dx;
   y += dy;
   z += dz;
-  char buffer[50];
-  sprintf(buffer, "x = %.2f, y = %.2f, z = %.2f\n",dx,dy,dz);
-  Serial.printf(buffer);
+  Serial.printf("x = %.2f, y = %.2f, z = %.2f\r\n", dx, dy, dz);
   delay(delayBetweenHIDReports);
 }

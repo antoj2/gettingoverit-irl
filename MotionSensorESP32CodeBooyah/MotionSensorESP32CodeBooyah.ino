@@ -14,9 +14,8 @@ constexpr int delayBetweenHIDReports = 5; // Additional delay in milliseconds be
 void setup()
 {
     Serial.begin(115200);
-    myCodeCell.Init(MOTION_ACCELEROMETER); // starter bevægelses ting
-
-    
+    myCodeCell.Init(MOTION_ACCELEROMETER); // starter bevægelses ting  
+    Serial.print("STARTET");
 }
 
 
@@ -31,13 +30,15 @@ void loop()
     Serial.print("%, ");
     lastTimeBatteryWasChecked=millis();
   }
+  if (myCodeCell.Run(10)) 
+  {  //Run every 10Hz
 
-
-    if (myCodeCell.Run(10)) 
-    {  //Run every 10Hz
-    
-    }
-
-    //Hvis man stejler på sit skateboard:
-    delay(delayBetweenHIDReports);
+  }
+  Serial.print("\nx: ");
+  Serial.print(x);
+  Serial.print("\ny: ");
+  Serial.print(y);
+  Serial.print("\nz: ");
+  Serial.print(z);
+  delay(delayBetweenHIDReports);
 }

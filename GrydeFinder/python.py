@@ -37,10 +37,25 @@ no Kalman filter) is as in v2.
 Keys:  q quit | r reset | t save debug_frame.png | k save raw frame to captures/
 Offline test of a saved frame (no capture needed):
        python pot_tracker.py --image captures/frame_0000.png
+
+Started by another program (see the C# host):   python pot_tracker.py --ipc
+  stdout: one JSON object per line, e.g.
+     {"type":"anchor","t":1760000000.123,"frame":812,"w":2560,"h":1600,"valid":true,"status":"TRACKING",
+      "x":1020.4,"y":842.9,"pot_x":1105.8,"pot_y":960.1,"angle":9.0,"score":0.41,"ms":14.2}
+     valid  = measured on this very frame;  false while HOLD / LOST (x, y are then the last known
+              position, or null when there is none).   x, y = anchor, in pixels of the captured
+              window (w x h).   angle: degrees, + = pot tilted counter-clockwise on screen.
+  stdin : quit | reset | show | hide | anchor_up <px>      (closing stdin also quits)
+  stderr: log text.
+Options: --template PNG  --anchor-up PX  --show / --no-show   (python pot_tracker.py -h)
 """
 
+import argparse
+import json
 import math
 import os
+import queue
+import signal
 import sys
 import threading
 import time
@@ -119,7 +134,7 @@ FAST_ANGLE_SPAN = 3.0          # ...and rotate this many degrees
 HOLD_MAX = 20                  # frames to hold the last pose before LOST
 
 # --- output ------------------------------------------------
-ANCHOR_UP_PX = 80.0            # px from the pot centre to your point, along the pot's "up"
+ANCHOR_UP_PX = 124.0           # px from the pot centre to your point, along the pot's "up"
 
 THREADS = max(1, min(8, (os.cpu_count() or 2)))
 
@@ -804,11 +819,98 @@ def draw_pose(display, pose, tw, th, color):
 
 
 # ============================================================
+# IPC  -  for when another program starts the tracker:  python pot_tracker.py --ipc
+# ============================================================
+
+IPC_PROTOCOL = 1
+
+
+def _num(v, digits=2):
+    """JSON-safe number: None for missing / NaN / inf."""
+    if v is None:
+        return None
+    v = float(v)
+    return round(v, digits) if math.isfinite(v) else None
+
+
+class Ipc:
+    """Line-based JSON channel to the parent process.
+
+    stdout -> parent : one JSON object per line.  type = ready | anchor | status | error | stopped
+    stdin  <- parent : one text command per line:  quit | reset | show | hide | anchor_up <px>
+    stderr           : free-form log text for humans.
+
+    Closing stdin (or the parent dying) shuts the tracker down cleanly.
+    """
+
+    def __init__(self):
+        fd = os.dup(1)                  # keep the real stdout for JSON ...
+        os.dup2(2, 1)                   # ... and send everything else that prints (even C libraries) to stderr
+        sys.stdout = sys.stderr
+        self._out = os.fdopen(fd, "w", buffering=1, encoding="utf-8")
+        self._lock = threading.Lock()
+        self.commands = queue.Queue()
+        self.alive = True
+        threading.Thread(target=self._read_stdin, daemon=True).start()
+
+    def emit(self, **msg):
+        try:
+            line = json.dumps(msg, separators=(",", ":"), allow_nan=False)
+            with self._lock:
+                self._out.write(line + "\n")
+                self._out.flush()
+        except (BrokenPipeError, OSError, ValueError):
+            self.alive = False          # the parent is gone
+
+    def _read_stdin(self):
+        try:
+            for line in sys.stdin:
+                line = line.strip()
+                if line:
+                    self.commands.put(line)
+        except Exception:
+            pass
+        self.commands.put("quit")       # stdin closed -> parent finished or died
+
+
+# ============================================================
 # MAIN
 # ============================================================
 
-def main():
+def _on_sigterm(*_):
+    raise KeyboardInterrupt
+
+
+def main(args):
+    ipc = Ipc() if args.ipc else None
+    try:
+        signal.signal(signal.SIGTERM, _on_sigterm)
+    except (ValueError, OSError):
+        pass
+    reason = "error"
+    try:
+        reason = _run(args, ipc)
+    except KeyboardInterrupt:
+        reason = "interrupted"
+    except Exception as e:
+        if ipc:
+            ipc.emit(type="error", msg=f"{type(e).__name__}: {e}")
+        raise
+    finally:
+        if ipc:
+            ipc.emit(type="stopped", reason=reason)
+        print("\nStopped.")
+
+
+def _run(args, ipc):
+    global ANCHOR_UP_PX
     from pipewire_capture import PortalCapture, CaptureStream
+
+    show = SHOW_WINDOW and ipc is None          # a hosted tracker is headless unless asked
+    if args.show:
+        show = True
+    if args.no_show:
+        show = False
 
     gray_t, alpha_t = load_template()
     det = Detector(gray_t, alpha_t)
@@ -818,26 +920,71 @@ def main():
           f"{det.coarse.banks[0].n} pts), fine 1/{det.kf} ({len(det.f_angles)} angles, "
           f"{det.fine.banks[0].n} pts), {THREADS} threads")
 
+    if ipc:
+        ipc.emit(type="status", msg="select the Getting Over It window")
     print("\nPlease select the Getting Over It window.\n")
     session = PortalCapture().select_window()
     if session is None:
         print("Screen selection cancelled.")
-        raise SystemExit
+        if ipc:
+            ipc.emit(type="error", msg="window selection cancelled")
+        raise SystemExit(2)
     print(f"Capture size: {session.width} x {session.height}")
 
     stream = CaptureStream(session.fd, session.node_id, session.width, session.height,
                            capture_interval=0)
     stream.start()
-    Path("captures").mkdir(exist_ok=True)
+    if ipc:
+        ipc.emit(type="status", msg="capturing")
     n_saved = 0
+    n_frames = 0
+    ready_sent = False
+    reason = "closed"
 
     try:
         while True:
+            # ---- commands from the parent program ----
+            if ipc is not None:
+                stop = None
+                while stop is None:
+                    try:
+                        cmd = ipc.commands.get_nowait()
+                    except queue.Empty:
+                        break
+                    word, _, rest = cmd.partition(" ")
+                    word = word.lower()
+                    if word == "quit":
+                        stop = "quit"
+                    elif word == "reset":
+                        tracker.reset()
+                    elif word == "show":
+                        show = True
+                    elif word == "hide":
+                        show = False
+                        cv2.destroyAllWindows()
+                        cv2.waitKey(1)
+                    elif word == "anchor_up":
+                        try:
+                            ANCHOR_UP_PX = float(rest)
+                        except ValueError:
+                            print(f"[bad command] {cmd}")
+                    else:
+                        print(f"[unknown command] {cmd}")
+                if stop:
+                    reason = stop
+                    break
+                if not ipc.alive:
+                    reason = "parent gone"
+                    break
+
             frame = stream.get_frame()
             if frame is None:
                 if stream.window_invalid:
-                    print("Capture error:" if stream.error else "Capture window closed.",
-                          stream.error or "")
+                    msg = f"capture error: {stream.error}" if stream.error else "capture window closed"
+                    print(msg)
+                    if ipc:
+                        ipc.emit(type="error" if stream.error else "status", msg=msg)
+                    reason = "window closed"
                     break
                 time.sleep(0.001)
                 continue
@@ -846,16 +993,34 @@ def main():
             bgr = cv2.cvtColor(frame, cv2.COLOR_BGRA2BGR)
             pose = tracker.update(bgr)
             ms = (time.perf_counter() - t0) * 1000
-
+            n_frames += 1
+            ax = ay = None
             if pose is not None:
                 ax, ay = anchor_point(pose.cx, pose.cy, pose.angle)
+
+            if ipc is not None:
+                h, w = bgr.shape[:2]
+                if not ready_sent:
+                    ipc.emit(type="ready", protocol=IPC_PROTOCOL, w=w, h=h,
+                             anchor_up=ANCHOR_UP_PX, pid=os.getpid())
+                    ready_sent = True
+                ipc.emit(type="anchor", t=round(time.time(), 3), frame=n_frames, w=w, h=h,
+                         valid=tracker.status in ("TRACKING", "WEAK", "ACQUIRED", "JUMPED"),
+                         status=tracker.status,
+                         x=_num(ax, 1), y=_num(ay, 1),
+                         pot_x=_num(pose.cx, 1) if pose else None,
+                         pot_y=_num(pose.cy, 1) if pose else None,
+                         angle=_num(pose.angle, 1) if pose else None,
+                         score=_num(pose.score, 3) if pose else None,
+                         ms=_num(ms, 1))
+            elif pose is not None:
                 print(f"\r{tracker.status:<9} pot=({pose.cx:7.1f},{pose.cy:7.1f}) "
                       f"anchor=({ax:7.1f},{ay:7.1f}) angle={pose.angle:+6.1f} "
                       f"score={pose.score:.2f} {ms:5.1f}ms   ", end="", flush=True)
             else:
                 print(f"\r{tracker.status:<9}" + " " * 70, end="", flush=True)
 
-            if SHOW_WINDOW:
+            if show:
                 display = bgr.copy()
                 ok = tracker.status in ("TRACKING", "ACQUIRED", "JUMPED")
                 color = ((0, 255, 0) if ok else (0, 165, 255) if pose is not None else (0, 0, 255))
@@ -868,6 +1033,7 @@ def main():
 
                 key = cv2.waitKey(1) & 0xFF
                 if key == ord("q"):
+                    reason = "key q"
                     break
                 if key == ord("r"):
                     tracker.reset()
@@ -875,6 +1041,7 @@ def main():
                     cv2.imwrite("debug_frame.png", display)
                     print("\nSaved debug_frame.png")
                 if key == ord("k"):
+                    Path("captures").mkdir(exist_ok=True)
                     cv2.imwrite(f"captures/frame_{n_saved:04d}.png", bgr)
                     n_saved += 1
                     print(f"\nSaved captures/frame_{n_saved - 1:04d}.png")
@@ -882,11 +1049,30 @@ def main():
         stream.stop()
         session.close()
         cv2.destroyAllWindows()
-        print("\nStopped.")
+    return reason
+
+
+def parse_args():
+    ap = argparse.ArgumentParser(description="Getting Over It pot tracker")
+    ap.add_argument("--image", metavar="PNG", help="test on one saved frame and exit")
+    ap.add_argument("--ipc", action="store_true",
+                    help="machine-readable mode for a parent program: JSON lines on stdout, commands on stdin")
+    ap.add_argument("--template", metavar="PNG", help=f"pot template (default: {TEMPLATE_FILE})")
+    ap.add_argument("--anchor-up", type=float, metavar="PX",
+                    help=f"anchor distance above the pot centre (default: {ANCHOR_UP_PX:g})")
+    g = ap.add_mutually_exclusive_group()
+    g.add_argument("--show", action="store_true", help="show the debug window (default: on, except with --ipc)")
+    g.add_argument("--no-show", action="store_true", help="never show the debug window")
+    return ap.parse_args()
 
 
 if __name__ == "__main__":
-    if len(sys.argv) >= 3 and sys.argv[1] == "--image":
-        run_image(sys.argv[2])
+    _args = parse_args()
+    if _args.template:
+        TEMPLATE_FILE = Path(_args.template)
+    if _args.anchor_up is not None:
+        ANCHOR_UP_PX = _args.anchor_up
+    if _args.image:
+        run_image(_args.image)
     else:
-        main()
+        main(_args)

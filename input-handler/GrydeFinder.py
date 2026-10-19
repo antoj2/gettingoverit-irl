@@ -42,7 +42,6 @@ Offline test of a saved frame (no capture needed):
 import math
 import os
 import sys
-import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
@@ -55,7 +54,7 @@ import numpy as np
 # CONFIGURATION
 # ============================================================
 
-TEMPLATE_FILE = Path("GrydeFinder/pot_template.png")
+TEMPLATE_FILE = Path("input-handler/pot_template.png")
 SHOW_WINDOW = True
 
 # --- rotation ----------------------------------------------

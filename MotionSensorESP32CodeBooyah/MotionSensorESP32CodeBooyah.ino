@@ -1,7 +1,20 @@
 #include <Arduino.h>
+#include <WiFi.h>
+#include <WiFiUdp.h>
 #include <CodeCell.h>
 
 CodeCell myCodeCell;
+
+
+// ============================================================
+// Wifi!
+// ============================================================
+
+const char* ssid = "SchimonsTuffESP32";
+const char* password = "VerityErTuff";
+IPAddress computerIP (192,168,4,2);
+WiFiUDP udp;
+const int port = 4210;
 
 
 // ============================================================
@@ -10,6 +23,16 @@ CodeCell myCodeCell;
 
 float posX = 0.0f;
 float posY = 0.0f;
+
+void sendPosition(float x, float y) {
+  udp.beginPacket(computerIP, port);
+
+  udp.print(x);
+  udp.print(",");
+  udp.print(y);
+
+  udp.endPacket();
+}
 
 
 // ============================================================
@@ -186,6 +209,10 @@ void setup()
         MOTION_ROTATION
     );
 
+    WiFi.softAP(ssid, password);
+
+    Serial.println("Access Point started");
+    Serial.println(WiFi.softAPIP());
 
     Serial.println();
     Serial.println("=================================");
@@ -218,8 +245,7 @@ void loop()
 
     if (millis() - lastBatteryCheck > 30000)
     {
-        uint16_t level =
-            myCodeCell.BatteryLevelRead();
+        uint16_t level = myCodeCell.BatteryLevelRead();
 
         Serial.print("Battery: ");
         Serial.print(level);
@@ -522,7 +548,9 @@ void loop()
         // OUTPUT
         // ====================================================
 
-        Serial.printf(
+        sendPosition(posX,posY);
+
+        /*Serial.printf(
             "POS X=%+.3f Y=%+.3f | "
             "VEL X=%+.3f Y=%+.3f | "
             "ACC X=%+.3f Y=%+.3f | "
@@ -541,7 +569,7 @@ void loop()
             biasX,
             biasY,
 
-            stationary ? 1 : 0
-        );
+            stationary
+        );*/
     }
 }

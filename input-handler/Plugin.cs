@@ -43,11 +43,13 @@ namespace GoiBridge
         enum Mode { None, World, Screen, Polar }
         Mode _mode = Mode.None;
         float _a, _b;               // meaning depends on mode
+        int _method = 3;            // how the override is applied, see Apply(); 3 = cursor transform (best in tests)
 
         UdpClient _tx, _rx;
         IPEndPoint _target;
         PlayerControl _pc;
-        float _nextLookup;
+        float _nextLookup, _nextBeat, _nextErr;
+        int _sent;
 
         void Awake()
         {
@@ -66,8 +68,21 @@ namespace GoiBridge
                 Lookup();
                 ReadCommands();
                 Send();
+                _sent++;
+                if (Time.unscaledTime > _nextBeat)
+                {
+                    _nextBeat = Time.unscaledTime + 5f;
+                    Plugin.Instance.Log.LogInfo("heartbeat: packets sent=" + _sent + " playerControl=" + (_pc != null) + " method=" + _method + " override=" + _mode);
+                }
             }
-            catch (Exception e) { Plugin.Instance.Log.LogWarning("Update: " + e.Message); }
+            catch (Exception e)
+            {
+                if (Time.unscaledTime > _nextErr)
+                {
+                    _nextErr = Time.unscaledTime + 5f;
+                    Plugin.Instance.Log.LogError("Update failed: " + e);
+                }
+            }
         }
 
         // Runs every physics step. The game's own FixedUpdate may run before/after us, so
@@ -102,6 +117,7 @@ namespace GoiBridge
                 try
                 {
                     if (p[0] == "off") _mode = Mode.None;
+                    else if (p[0] == "X" && p.Length >= 2) _method = int.Parse(p[1], CultureInfo.InvariantCulture);
                     else if (p.Length >= 3)
                     {
                         _a = float.Parse(p[1], CultureInfo.InvariantCulture);
@@ -142,7 +158,19 @@ namespace GoiBridge
                 float r = _b, th = _a * (MathF.PI / 180f);
                 w = new Vector2(c.x + r * MathF.Cos(th), c.y + r * MathF.Sin(th));
             }
-            _pc.mw = w;
+            var rb = _pc.fakeCursorRB;
+            switch (_method)
+            {
+                case 0: _pc.mw = w; break;                                        // the game's cursor target field
+                case 1: rb.position = w; break;                                   // cursor rigidbody, teleport
+                case 2: rb.MovePosition(w); break;                                // cursor rigidbody, physics move
+                case 3: { var p = _pc.fakeCursor.position; _pc.fakeCursor.position = new Vector3(w.x, w.y, p.z); break; } // transform
+                case 4:                                                           // everything at once
+                    _pc.mw = w; rb.position = w;
+                    { var p = _pc.fakeCursor.position; _pc.fakeCursor.position = new Vector3(w.x, w.y, p.z); }
+                    break;
+                case 5: rb.velocity = (w - rb.position) * 50f; break;             // chase with velocity (1/0.02s)
+            }
         }
 
         // ---------------- outbound ----------------
@@ -164,6 +192,10 @@ namespace GoiBridge
                     var s = cam.WorldToScreenPoint(fc);    // in-game cursor, screen pixels
                     sb.Append(",\"mx\":").Append(F(s.x)).Append(",\"my\":").Append(F(s.y));
                 }
+                sb.Append(",\"mt\":").Append(_method);
+                var crb = _pc.fakeCursorRB; var cp = crb.position; var cv = crb.velocity;
+                sb.Append(",\"rx\":").Append(F(cp.x)).Append(",\"ry\":").Append(F(cp.y));
+                sb.Append(",\"vx\":").Append(F(cv.x)).Append(",\"vy\":").Append(F(cv.y));
                 var mw = _pc.mw;
                 sb.Append(",\"wx\":").Append(F(mw.x)).Append(",\"wy\":").Append(F(mw.y));
                 var tip = _pc.tip.position;

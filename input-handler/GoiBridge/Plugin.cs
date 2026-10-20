@@ -43,7 +43,7 @@ namespace GoiBridge
         enum Mode { None, World, Screen, Polar }
         Mode _mode = Mode.None;
         float _a, _b;               // meaning depends on mode
-        int _method;                // how the override is applied, see Apply()
+        int _method = 3;            // how the override is applied, see Apply(); 3 = cursor transform (best in tests)
 
         UdpClient _tx, _rx;
         IPEndPoint _target;

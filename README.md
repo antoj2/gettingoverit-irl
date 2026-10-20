@@ -1,6 +1,18 @@
 # gettingoverit-irl
 
-Getting Over It with hand tracking
+This repository is client-side and controller-side code that let's you control the hammer in the game "Getting Over It" using a codecell and/or skeleton-tracking.
+
+---
+
+# Codecell
+
+coming soon
+
+---
+
+# Skeleton-tracking
+
+coming soon
 
 ---
 

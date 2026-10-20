@@ -439,10 +439,23 @@ void loop()
                 // and also reset position
                 // ------------------------------------------------
 
-                velX = 0.0f;
-                velY = 0.0f;
+                // ------------------------------------------------
+                // LEARN ACCELEROMETER BIAS
+                // ------------------------------------------------
+
+                biasX = biasX * (1.0f - BIAS_LEARNING_RATE) + filteredAx * BIAS_LEARNING_RATE;
+                biasY = biasY * (1.0f - BIAS_LEARNING_RATE) + filteredAy * BIAS_LEARNING_RATE;
+
                 posX = 0.0f;
                 posY = 0.0f;
+                velX = 0.0f;
+                velY = 0.0f;
+                previousAx = 0.0f;
+                previousAy = 0.0f;
+                filteredAx = 0.0f;
+                filteredAy = 0.0f;
+                worldAx = 0.0f;
+                worldAy = 0.0f;
 
 
 
@@ -450,13 +463,7 @@ void loop()
                 // LEARN ACCELEROMETER BIAS
                 // ------------------------------------------------
 
-                biasX =
-                    biasX * (1.0f - BIAS_LEARNING_RATE)
-                    + filteredAx * BIAS_LEARNING_RATE;
 
-                biasY =
-                    biasY * (1.0f - BIAS_LEARNING_RATE)
-                    + filteredAy * BIAS_LEARNING_RATE;
             }
         }
         else

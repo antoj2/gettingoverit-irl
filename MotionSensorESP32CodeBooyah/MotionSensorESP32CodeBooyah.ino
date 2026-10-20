@@ -24,12 +24,14 @@ const int port = 4210;
 float posX = 0.0f;
 float posY = 0.0f;
 
-void sendPosition(float x, float y) {
+void sendPosition(float x, float y, float bat) {
   udp.beginPacket(computerIP, port);
 
   udp.print(x);
   udp.print(",");
   udp.print(y);
+  udp.print(",");
+  udp.print(bat);
 
   udp.endPacket();
 }
@@ -201,7 +203,7 @@ void rotateVector(
 
 void setup()
 {
-    Serial.begin(115200);
+    // Serial.begin(115200);
 
 
     myCodeCell.Init(
@@ -210,7 +212,7 @@ void setup()
     );
 
     WiFi.softAP(ssid, password);
-
+    /*
     Serial.println("Access Point started");
     Serial.println(WiFi.softAPIP());
 
@@ -230,27 +232,28 @@ void setup()
     delay(1500);
 
     lastUpdate = micros();
+    */
 }
 
 
 // ============================================================
 // LOOP
 // ============================================================
-
+uint16_t batteryLevel = 100;
 void loop()
 {
     // --------------------------------------------------------
     // Battery
     // --------------------------------------------------------
-
+    
     if (millis() - lastBatteryCheck > 30000)
     {
-        uint16_t level = myCodeCell.BatteryLevelRead();
-
+        batteryLevel = myCodeCell.BatteryLevelRead();
+        /*
         Serial.print("Battery: ");
         Serial.print(level);
         Serial.println("%");
-
+        */
         lastBatteryCheck = millis();
     }
 
@@ -335,10 +338,10 @@ void loop()
             q0K = qK;
 
             referenceSet = true;
-
+            /*
             Serial.println("REFERENCE SET");
             Serial.println();
-
+            */
             return;
         }
 
@@ -433,10 +436,14 @@ void loop()
                 //
                 // If the CodeCell has been still for long enough,
                 // its real velocity must be zero.
+                // and also reset position
                 // ------------------------------------------------
 
                 velX = 0.0f;
                 velY = 0.0f;
+                posX = 0.0f;
+                posY = 0.0f;
+
 
 
                 // ------------------------------------------------
@@ -548,7 +555,7 @@ void loop()
         // OUTPUT
         // ====================================================
 
-        sendPosition(posX,posY);
+        sendPosition(posX,posY,batteryLevel);
 
         /*Serial.printf(
             "POS X=%+.3f Y=%+.3f | "

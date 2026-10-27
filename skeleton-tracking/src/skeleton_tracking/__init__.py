@@ -1,13 +1,11 @@
 # pyright: basic
 import json
 import os
-import time
 import cv2
 import mediapipe as mp
 from mediapipe.tasks import python
 from mediapipe.tasks.python import vision
 import numpy as np
-from contextlib import ExitStack
 
 
 # Initialize PoseLandmarker

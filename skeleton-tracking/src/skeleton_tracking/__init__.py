@@ -36,21 +36,23 @@ def average_hand(a, b, c):
 def get_camera_index() -> int:
     def validate_camera(index: int) -> bool:
         cap = cv2.VideoCapture(index)
-        valid = cap.isOpened()
         try:
-            return valid
+            return cap.isOpened()
         finally:
-            if not valid:
-                cap.release()
+            cap.release()
 
     while True:
         print("Hvilket kamera index vil du gerne bruge?")
-        index = input()
-        idx = int(index)
+        try:
+            idx = int(input())
+        except ValueError:
+            print("Indtast venligst et gyldigt tal!")
+            continue
+
         if validate_camera(idx):
             return idx
-        else:
-            print("Det var ikke et rigtigt kamera!")
+
+        print("Det var ikke et rigtigt kamera!")
 
 
 def main() -> None:

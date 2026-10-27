@@ -1,10 +1,14 @@
 # pyright: basic
 import json
+import os
+import time
 import cv2
 import mediapipe as mp
 from mediapipe.tasks import python
 from mediapipe.tasks.python import vision
 import numpy as np
+from contextlib import ExitStack
+
 
 # Initialize PoseLandmarker
 base_options = python.BaseOptions(
@@ -31,10 +35,33 @@ def average_hand(a, b, c):
     return (x, y, z)
 
 
+def get_camera_index() -> int:
+    def validate_camera(index: int) -> bool:
+        cap = cv2.VideoCapture(index)
+        valid = cap.isOpened()
+        try:
+            return valid
+        finally:
+            if not valid:
+                cap.release()
+
+    while True:
+        print("Hvilket kamera index vil du gerne bruge?")
+        index = input()
+        try:
+            idx = int(index)
+            if validate_camera(idx):
+                return idx
+        except:
+            print("Det var ikke et rigtigt kamera!")
+
+
 def main() -> None:
+    cam_index = get_camera_index()
+
     detector = vision.PoseLandmarker.create_from_options(options)
 
-    cap = cv2.VideoCapture(1)
+    cap = cv2.VideoCapture(cam_index)
 
     while cap.isOpened():
         ret, frame = cap.read()
@@ -52,10 +79,11 @@ def main() -> None:
 
         if detection_result.pose_landmarks:
             for pose_landmarks in detection_result.pose_landmarks:
-                for landmark in pose_landmarks:
-                    cx, cy = int(landmark.x * w), int(landmark.y * h)
+                if "DEBUG" in os.environ and os.environ.get("DEBUG") == "true":
+                    for landmark in pose_landmarks:
+                        cx, cy = int(landmark.x * w), int(landmark.y * h)
 
-                    cv2.circle(frame, (cx, cy), 5, (255, 0, 0), cv2.FILLED)
+                        cv2.circle(frame, (cx, cy), 5, (255, 0, 0), cv2.FILLED)
 
                 left = average_hand(
                     pose_landmarks[15], pose_landmarks[17], pose_landmarks[19]

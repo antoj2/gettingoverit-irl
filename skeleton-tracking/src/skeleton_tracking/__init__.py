@@ -48,11 +48,10 @@ def get_camera_index() -> int:
     while True:
         print("Hvilket kamera index vil du gerne bruge?")
         index = input()
-        try:
-            idx = int(index)
-            if validate_camera(idx):
-                return idx
-        except:
+        idx = int(index)
+        if validate_camera(idx):
+            return idx
+        else:
             print("Det var ikke et rigtigt kamera!")
 
 

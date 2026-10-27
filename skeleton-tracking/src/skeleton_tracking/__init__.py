@@ -46,13 +46,13 @@ def get_camera_index() -> int:
         try:
             idx = int(input())
         except ValueError:
-            print("Indtast venligst et gyldigt tal!")
+            print("Det er ikke et rigtigt tal")
             continue
 
         if validate_camera(idx):
             return idx
 
-        print("Det var ikke et rigtigt kamera!")
+        print("Det kamera eksisterer ikke")
 
 
 def main() -> None:

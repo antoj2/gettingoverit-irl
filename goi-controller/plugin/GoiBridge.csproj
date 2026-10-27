@@ -17,10 +17,7 @@
        Point GameDir at your "Getting Over It" folder. -->
   <!-- Override on the command line:  dotnet build -c Release -p:GameDir="/path/to/Getting Over It" -->
   <PropertyGroup Condition="'$(GameDir)' == '' And '$(HOME)' != ''">
-    <GameDir>$(HOME)/Getting Over It</GameDir>
-  </PropertyGroup>
-  <PropertyGroup Condition="'$(GameDir)' == ''">
-    <GameDir>$(USERPROFILE)/Getting Over It</GameDir>
+    <GameDir>$(HOME)/snap/steam/common/.local/share/Steam/steamapps/common/Getting Over It</GameDir>
   </PropertyGroup>
   <ItemGroup>
     <Reference Include="$(GameDir)/BepInEx/interop/*.dll" Private="false" />

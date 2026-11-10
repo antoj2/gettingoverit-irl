@@ -9,9 +9,7 @@ try:
         data, address = sock.recvfrom(1024)
         try:
             angle, battery_text = data.decode('utf-8').strip().split(',')
-#            x, y, battery = float(x_text), float(y_text), float(battery_text)
             print("Angle: " + angle + " Battery: " + battery_text, end='\n', flush=True)
-            # print(f'\rX: {x:+10.4f} | Y: {y:+10.4f} | Battery: {battery:.0f}%', end='', flush=True)
         except (ValueError, UnicodeDecodeError):
             print(f'\nInvalid packet: {data!r}')
 except KeyboardInterrupt:

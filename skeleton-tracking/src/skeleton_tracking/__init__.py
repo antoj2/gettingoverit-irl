@@ -23,11 +23,24 @@ options = vision.PoseLandmarkerOptions(
 )
 
 
-@dataclass(frozen=True)
 class Point:
     x: float
     y: float
     z: float | None
+
+    def __init__(self, x: float, y: float, z: float | None = None) -> None:
+        self.x = x
+        self.y = y
+        self.z = z
+
+    def __truediv__(self, other: float) -> Self:
+        return type(self)(self.x / other, self.y / other, None)
+
+    def __add__(self, other: Self) -> Self:
+        return type(self)(self.x + other.x, self.y + other.y, None)
+
+    def __mul__(self, other: float) -> Self:
+        return type(self)(self.x * other, self.y * other, None)
 
     @classmethod
     def from_landmark(cls, lm: Any) -> Self:
@@ -37,12 +50,8 @@ class Point:
     def from_tuple(cls, tup: Any) -> Self:
         return cls(tup[0], tup[1], tup[2])
 
-    @classmethod
-    def from_xyz(cls, x: float, y: float, z: float | None = None) -> Self:
-        return cls(x, y, z)
-
     def midpoint(self, rhs: Self) -> Self:
-        return type(self).from_xyz((self.x + rhs.x) / 2, (self.y + rhs.y) / 2, None)
+        return type(self)((self.x + rhs.x) / 2, (self.y + rhs.y) / 2, None)
 
     def correct(self, w: int, h: int) -> Self:
         return type(self)(self.x * w, self.y * h, None)
@@ -62,6 +71,9 @@ class Point:
     def dist(self, rhs: Self) -> float:
         return math.dist(self.as_tuple(), rhs.as_tuple())
 
+    def length(self) -> float:
+        return math.sqrt(self.x**2 + self.y**2)
+
 
 def average_hand(a: Point, b: Point, c: Point):
     x = (a.x + b.x + c.x) / 3
@@ -70,7 +82,7 @@ def average_hand(a: Point, b: Point, c: Point):
     if a.z is not None and b.z is not None and c.z is not None:
         z = (a.z + b.z + c.z) / 3
 
-    return Point.from_xyz(x, y, z)
+    return Point(x, y, z)
 
 
 def get_camera_index() -> int:
@@ -185,8 +197,26 @@ def main() -> None:
                     break
 
                 shoulder_dist = left_shoulder.dist(right_shoulder)
-
                 hand_dist = left.dist(right)
+
+                shoulder_mid = left_shoulder.midpoint(right_shoulder)
+
+                thingy = shoulder_dist / 10
+
+                perp = Point(
+                    -(right_shoulder.y - left_shoulder.y),
+                    right_shoulder.x - left_shoulder.x,
+                )
+                perp_unit = perp / perp.length()
+
+                maybe_chest_mid = shoulder_mid + (perp_unit * thingy)
+                cv2.circle(
+                    frame,
+                    maybe_chest_mid.as_tuple_int(),
+                    5,
+                    (255, 255, 255),
+                    cv2.FILLED,
+                )
 
                 if hand_dist > shoulder_dist:
                     frame = cv2.flip(frame, 1)

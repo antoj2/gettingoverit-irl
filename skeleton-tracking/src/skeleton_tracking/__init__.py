@@ -6,6 +6,7 @@ import mediapipe as mp
 from mediapipe.tasks import python
 from mediapipe.tasks.python import vision
 import numpy as np
+import math
 
 
 # Initialize PoseLandmarker
@@ -90,6 +91,56 @@ def main() -> None:
                 right = average_hand(
                     pose_landmarks[16], pose_landmarks[18], pose_landmarks[20]
                 )
+
+                if (
+                    left[0] < 0
+                    or left[0] > 1
+                    or left[1] < 0
+                    or left[1] > 1
+                    or right[0] < 0
+                    or right[0] > 1
+                    or right[1] < 0
+                    or right[1] > 1
+                ):
+                    frame = cv2.flip(frame, 1)
+                    cv2.putText(
+                        frame,
+                        "Dine hænder skal være inden for billedet",
+                        (100, 100),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        1,
+                        (255, 0, 0),
+                        2,
+                    )
+                    frame = cv2.flip(frame, 1)
+                    break
+
+                left_shoulder = [pose_landmarks[12].x * w, pose_landmarks[12].y * h]
+                right_shoulder = [pose_landmarks[11].x * w, pose_landmarks[11].y * h]
+
+                if (
+                    left_shoulder[0] < 0
+                    or left_shoulder[0] > w
+                    or left_shoulder[1] < 0
+                    or left_shoulder[1] > h
+                    or right_shoulder[0] < 0
+                    or right_shoulder[0] > w
+                    or right_shoulder[1] < 0
+                    or right_shoulder[1] > h
+                ):
+                    frame = cv2.flip(frame, 1)
+                    cv2.putText(
+                        frame,
+                        "Dine skuldre skal være inden for billedet",
+                        (100, 100),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        1,
+                        (255, 0, 0),
+                        2,
+                    )
+                    frame = cv2.flip(frame, 1)
+                    break
+
                 print(
                     json.dumps({"left": {"x": left[0] * w, "y": left[1] * h}}),
                     flush=True,
@@ -98,6 +149,26 @@ def main() -> None:
                     json.dumps({"right": {"x": right[0] * w, "y": right[1] * h}}),
                     flush=True,
                 )
+
+                shoulder_dist = math.dist(left_shoulder, right_shoulder)
+
+                hand_dist = math.dist(
+                    [left[0] * w, left[1] * h], [right[0] * w, right[1] * h]
+                )
+
+                if hand_dist > shoulder_dist:
+                    frame = cv2.flip(frame, 1)
+                    cv2.putText(
+                        frame,
+                        "Dine hænder må ikke være mere end 1 skuldrelængde fra hinanden",
+                        (100, 100),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        1,
+                        (255, 0, 0),
+                        2,
+                    )
+                    frame = cv2.flip(frame, 1)
+                    break
 
                 cv2.circle(
                     frame,

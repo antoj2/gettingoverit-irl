@@ -199,20 +199,20 @@ def main() -> None:
                 shoulder_dist = left_shoulder.dist(right_shoulder)
                 hand_dist = left.dist(right)
 
-                # if hand_dist > shoulder_dist:
-                #     frame = cv2.flip(frame, 1)
-                #     cv2.putText(
-                #         frame,
-                #         "Dine hænder må ikke være mere end 1 skuldrelængde fra hinanden",
-                #         (100, 100),
-                #         cv2.FONT_HERSHEY_SIMPLEX,
-                #         1,
-                #         (255, 0, 0),
-                #         2,
-                #     )
-                #     frame = cv2.flip(frame, 1)
-                #     break
-                #
+                if hand_dist > shoulder_dist:
+                    frame = cv2.flip(frame, 1)
+                    cv2.putText(
+                        frame,
+                        "Dine hænder må ikke være mere end 1 skuldrelængde fra hinanden",
+                        (100, 100),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        1,
+                        (255, 0, 0),
+                        2,
+                    )
+                    frame = cv2.flip(frame, 1)
+                    break
+
                 shoulder_mid = left_shoulder.midpoint(right_shoulder)
 
                 thingy = shoulder_dist / 10

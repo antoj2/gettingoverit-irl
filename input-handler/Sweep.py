@@ -7,22 +7,34 @@ rx = socket.socket(socket.AF_INET, socket.SOCK_DGRAM); rx.bind(("127.0.0.1", 987
 tx = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 send = lambda m: tx.sendto(m.encode(), ("127.0.0.1", 9876))
 def state():
-    """Return the NEWEST packet: block for one, then drain everything queued behind it."""
-    rx.settimeout(5)
-    last = json.loads(rx.recv(65536))
+    """Return the NEWEST packet: block for one, then drain everything queued behind it.
+    If nothing arrives, keep waiting (and say why it might be) instead of crashing."""
+    waited = 0
+    while True:
+        rx.settimeout(5)
+        try:
+            last = json.loads(rx.recv(65536)); break
+        except socket.timeout:
+            waited += 5
+            print(f"[no packets from the game for {waited}s] Is the game running with the GoiBridge plugin loaded? "
+                  "An older plugin build pauses when the window is unfocused: click the game window.", flush=True)
     rx.setblocking(False)
     try:
         while True: last = json.loads(rx.recv(65536))
     except BlockingIOError:
         pass
     rx.settimeout(5)
+    if last.get("fo") is False and not last.get("bg", False):
+        print("[game window unfocused and runInBackground is off - it may stall]", flush=True)
     return last
 def polar(s):
     dx, dy = s["tx"] - s["cx"], s["ty"] - s["cy"]
     return math.degrees(math.atan2(dy, dx)), math.hypot(dx, dy)
 def wrap(a): return (a + 180) % 360 - 180
 
-while "fx" not in state(): pass
+warned = False
+while "fx" not in state():
+    if not warned: print("Plugin connected, waiting for you to load into the game (PlayerControl not found yet)..."); warned = True
 send("off"); send("X 3"); time.sleep(0.5)
 s0 = state(); th0, r0 = polar(s0)
 print(f"start: tip angle {th0:.1f} deg, distance from pivot {r0:.2f}, slider st={s0['st']:.2f}")

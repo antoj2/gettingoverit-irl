@@ -57,6 +57,7 @@ namespace GoiBridge
             _tx = new UdpClient();
             _rx = new UdpClient(new IPEndPoint(IPAddress.Loopback, Plugin.ListenPort.Value));
             _rx.Client.Blocking = false;
+            Application.runInBackground = true;   // keep Update/FixedUpdate running when the window loses focus
         }
 
         // ---------------- per-frame ----------------
@@ -65,6 +66,8 @@ namespace GoiBridge
             try
             {
                 if (Input.GetKeyDown(Plugin.DumpKey.Value)) Dump();
+                // Re-assert in case the game (or a settings screen) turns it off again.
+                if (!Application.runInBackground) Application.runInBackground = true;
                 Lookup();
                 ReadCommands();
                 Send();
@@ -182,6 +185,8 @@ namespace GoiBridge
             sb.Append("{\"t\":").Append(F(Time.unscaledTime));
             sb.Append(",\"sw\":").Append(Screen.width).Append(",\"sh\":").Append(Screen.height);
             sb.Append(",\"ov\":").Append(_mode != Mode.None ? "true" : "false");
+            sb.Append(",\"fo\":").Append(Application.isFocused ? "true" : "false");     // window focused?
+            sb.Append(",\"bg\":").Append(Application.runInBackground ? "true" : "false"); // keeps running unfocused?
             if (_pc != null)
             {
                 var fc = _pc.fakeCursor.position;          // in-game cursor, world

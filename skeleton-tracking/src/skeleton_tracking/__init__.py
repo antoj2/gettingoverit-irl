@@ -1,11 +1,12 @@
 # pyright: basic
+from dataclasses import dataclass
 import json
 import os
+from typing import Any, Self
 import cv2
 import mediapipe as mp
 from mediapipe.tasks import python
 from mediapipe.tasks.python import vision
-import numpy as np
 import math
 
 
@@ -22,16 +23,54 @@ options = vision.PoseLandmarkerOptions(
 )
 
 
-def average_hand(a, b, c):
-    x1, y1, z1 = a.x, a.y, a.z
-    x2, y2, z2 = b.x, b.y, b.z
-    x3, y3, z3 = c.x, c.y, c.z
+@dataclass(frozen=True)
+class Point:
+    x: float
+    y: float
+    z: float | None
 
-    x = (x1 + x2 + x3) / 3
-    y = (y1 + y2 + y3) / 3
-    z = (z1 + z2 + z3) / 3
+    @classmethod
+    def from_landmark(cls, lm: Any) -> Self:
+        return cls(lm.x, lm.y, lm.z)
 
-    return (x, y, z)
+    @classmethod
+    def from_tuple(cls, tup: Any) -> Self:
+        return cls(tup[0], tup[1], tup[2])
+
+    @classmethod
+    def from_xyz(cls, x: float, y: float, z: float | None = None) -> Self:
+        return cls(x, y, z)
+
+    def midpoint(self, rhs: Self) -> Self:
+        return type(self).from_xyz((self.x + rhs.x) / 2, (self.y + rhs.y) / 2, None)
+
+    def correct(self, w: int, h: int) -> Self:
+        return type(self)(self.x * w, self.y * h, None)
+
+    def as_tuple(self) -> tuple[float, float] | tuple[float, float, float]:
+        if self.z is not None:
+            return (self.x, self.y, self.z)
+        else:
+            return (self.x, self.y)
+
+    def as_tuple_int(self) -> tuple[int, int] | tuple[int, int, int]:
+        if self.z is not None:
+            return (int(self.x), int(self.y), int(self.z))
+        else:
+            return (int(self.x), int(self.y))
+
+    def dist(self, rhs: Self) -> float:
+        return math.dist(self.as_tuple(), rhs.as_tuple())
+
+
+def average_hand(a: Point, b: Point, c: Point):
+    x = (a.x + b.x + c.x) / 3
+    y = (a.y + b.y + c.y) / 3
+    z = None
+    if a.z is not None and b.z is not None and c.z is not None:
+        z = (a.z + b.z + c.z) / 3
+
+    return Point.from_xyz(x, y, z)
 
 
 def get_camera_index() -> int:
@@ -86,21 +125,25 @@ def main() -> None:
                         cv2.circle(frame, (cx, cy), 5, (255, 0, 0), cv2.FILLED)
 
                 left = average_hand(
-                    pose_landmarks[15], pose_landmarks[17], pose_landmarks[19]
+                    Point.from_landmark(pose_landmarks[15]).correct(w, h),
+                    Point.from_landmark(pose_landmarks[17]).correct(w, h),
+                    Point.from_landmark(pose_landmarks[19]).correct(w, h),
                 )
                 right = average_hand(
-                    pose_landmarks[16], pose_landmarks[18], pose_landmarks[20]
+                    Point.from_landmark(pose_landmarks[16]).correct(w, h),
+                    Point.from_landmark(pose_landmarks[18]).correct(w, h),
+                    Point.from_landmark(pose_landmarks[20]).correct(w, h),
                 )
 
                 if (
-                    left[0] < 0
-                    or left[0] > 1
-                    or left[1] < 0
-                    or left[1] > 1
-                    or right[0] < 0
-                    or right[0] > 1
-                    or right[1] < 0
-                    or right[1] > 1
+                    left.x < 0
+                    or left.x > w
+                    or left.y < 0
+                    or left.y > h
+                    or right.x < 0
+                    or right.x > w
+                    or right.y < 0
+                    or right.y > h
                 ):
                     frame = cv2.flip(frame, 1)
                     cv2.putText(
@@ -115,18 +158,18 @@ def main() -> None:
                     frame = cv2.flip(frame, 1)
                     break
 
-                left_shoulder = [pose_landmarks[12].x * w, pose_landmarks[12].y * h]
-                right_shoulder = [pose_landmarks[11].x * w, pose_landmarks[11].y * h]
+                left_shoulder = Point.from_landmark(pose_landmarks[12]).correct(w, h)
+                right_shoulder = Point.from_landmark(pose_landmarks[11]).correct(w, h)
 
                 if (
-                    left_shoulder[0] < 0
-                    or left_shoulder[0] > w
-                    or left_shoulder[1] < 0
-                    or left_shoulder[1] > h
-                    or right_shoulder[0] < 0
-                    or right_shoulder[0] > w
-                    or right_shoulder[1] < 0
-                    or right_shoulder[1] > h
+                    left_shoulder.x < 0
+                    or left_shoulder.x > w
+                    or left_shoulder.y < 0
+                    or left_shoulder.y > h
+                    or right_shoulder.x < 0
+                    or right_shoulder.x > w
+                    or right_shoulder.y < 0
+                    or right_shoulder.y > h
                 ):
                     frame = cv2.flip(frame, 1)
                     cv2.putText(
@@ -141,20 +184,9 @@ def main() -> None:
                     frame = cv2.flip(frame, 1)
                     break
 
-                print(
-                    json.dumps({"left": {"x": left[0] * w, "y": left[1] * h}}),
-                    flush=True,
-                )
-                print(
-                    json.dumps({"right": {"x": right[0] * w, "y": right[1] * h}}),
-                    flush=True,
-                )
+                shoulder_dist = left_shoulder.dist(right_shoulder)
 
-                shoulder_dist = math.dist(left_shoulder, right_shoulder)
-
-                hand_dist = math.dist(
-                    [left[0] * w, left[1] * h], [right[0] * w, right[1] * h]
-                )
+                hand_dist = left.dist(right)
 
                 if hand_dist > shoulder_dist:
                     frame = cv2.flip(frame, 1)
@@ -170,16 +202,28 @@ def main() -> None:
                     frame = cv2.flip(frame, 1)
                     break
 
+                print(
+                    json.dumps({"left": {"x": left.x, "y": left.y}}),
+                    flush=True,
+                )
+                print(
+                    json.dumps({"right": {"x": right.x, "y": right.y}}),
+                    flush=True,
+                )
+
+                mid_hands = left.midpoint(right)
+                cv2.circle(frame, mid_hands.as_tuple_int(), 5, (0, 255, 0), cv2.FILLED)
+
                 cv2.circle(
                     frame,
-                    (int(right[0] * w), int(right[1] * h)),
+                    right.as_tuple_int(),
                     5,
                     (0, 0, 255),
                     cv2.FILLED,
                 )
                 cv2.circle(
                     frame,
-                    (int(left[0] * w), int(left[1] * h)),
+                    left.as_tuple_int(),
                     5,
                     (0, 0, 255),
                     cv2.FILLED,
@@ -197,3 +241,7 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
+# Midterpunkt mellem hænder
+# Afstand mellem chest midte og middle hænder
+# ^ Divider med w

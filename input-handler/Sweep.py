@@ -35,7 +35,7 @@ def wrap(a): return (a + 180) % 360 - 180
 warned = False
 while "fx" not in state():
     if not warned: print("Plugin connected, waiting for you to load into the game (PlayerControl not found yet)..."); warned = True
-send("off"); send("X 3"); time.sleep(0.5)
+send("off"); send("X 3"); send("set block_pause 1"); time.sleep(0.5)   # settings are forgotten when the game closes, so set them every run
 s0 = state(); th0, r0 = polar(s0)
 print(f"start: tip angle {th0:.1f} deg, distance from pivot {r0:.2f}, slider st={s0['st']:.2f}")
 
@@ -59,5 +59,5 @@ run("PHASE 1: angle sweep at constant distance", [(th0 + 360 * i / N, r0) for i 
 M = 300
 seq = [(th0, r0 * (0.6 + 0.9 * i / M)) for i in range(M)] + [(th0, r0 * (1.5 - 0.9 * i / M)) for i in range(M)]
 run("PHASE 2: distance sweep at constant angle", seq)
-send("off")
+send("off"); send("set block_pause 0")
 print("\ndone")

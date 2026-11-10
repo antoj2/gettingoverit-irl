@@ -51,6 +51,13 @@ namespace GoiBridge
         float _nextLookup, _nextBeat, _nextErr;
         int _sent;
 
+        // ---- settings (runtime only, forgotten when the game closes; the controller sets them via 'set <name> <value>') ----
+        bool _blockPause;           // set block_pause 1: the player cannot open the pause menu / pause the game
+        bool _ctrlPaused;           // pause 1: the controller has paused the game
+        float _ctrlSavedScale = 1f; // Time.timeScale to restore on 'pause 0'
+        SettingsManager _sm;
+        float _nextSmLookup, _nextBlockLog;
+
         void Awake()
         {
             _target = new IPEndPoint(IPAddress.Loopback, Plugin.SendPort.Value);
@@ -70,6 +77,7 @@ namespace GoiBridge
                 if (!Application.runInBackground) Application.runInBackground = true;
                 Lookup();
                 ReadCommands();
+                EnforceNoPause();
                 Send();
                 _sent++;
                 if (Time.unscaledTime > _nextBeat)
@@ -96,6 +104,66 @@ namespace GoiBridge
             catch (Exception e) { Plugin.Instance.Log.LogWarning("Apply: " + e.Message); }
         }
 
+        void LookupSm()
+        {
+            if (_sm != null) return;
+            if (Time.unscaledTime < _nextSmLookup) return;
+            _nextSmLookup = Time.unscaledTime + 1f;
+            var found = UnityEngine.Object.FindObjectsOfType(Il2CppInterop.Runtime.Il2CppType.Of<SettingsManager>(), false);
+            _sm = (found != null && found.Length > 0) ? found[0].TryCast<SettingsManager>() : null;
+            if (_sm != null) Plugin.Instance.Log.LogInfo("Found SettingsManager on '" + _sm.gameObject.name + "'");
+        }
+
+        static bool ParseBool(string s)
+        {
+            s = s.ToLowerInvariant();
+            return s == "1" || s == "true" || s == "on" || s == "yes";
+        }
+
+        // Called every frame (Update and LateUpdate). Layer 1 stops the game from opening its menu at all;
+        // layer 2 closes it again (through the game's own ToggleMenu) if it got opened anyway.
+        void EnforceNoPause()
+        {
+            if (!_blockPause) return;
+            LookupSm();
+            if (_sm != null) _sm.canMenu = false;
+            if (_ctrlPaused || _pc == null) return;
+            if (_pc.menuPause)
+            {
+                if (_sm != null) _sm.ToggleMenu();
+                else _pc.UnPause();
+                if (Time.timeScale == 0f) Time.timeScale = 1f;
+                if (Time.unscaledTime > _nextBlockLog)
+                {
+                    _nextBlockLog = Time.unscaledTime + 2f;
+                    Plugin.Instance.Log.LogInfo("block_pause: pause menu was opened by the player, closing it");
+                }
+            }
+        }
+
+        void LateUpdate()
+        {
+            try { EnforceNoPause(); }
+            catch (Exception e) { Plugin.Instance.Log.LogWarning("EnforceNoPause: " + e.Message); }
+        }
+
+        void SetControllerPause(bool pause)
+        {
+            if (pause == _ctrlPaused) return;
+            _ctrlPaused = pause;
+            if (pause)
+            {
+                _ctrlSavedScale = Time.timeScale > 0f ? Time.timeScale : 1f;
+                Time.timeScale = 0f;
+                AudioListener.pause = true;
+            }
+            else
+            {
+                Time.timeScale = _ctrlSavedScale;
+                AudioListener.pause = false;
+            }
+        }
+
         void Lookup()
         {
             if (_pc != null) return;
@@ -111,6 +179,8 @@ namespace GoiBridge
         //  M sx sy     screen pixels (origin bottom-left), converted to world
         //  H deg ext   hammer angle (degrees, 0 = +x, CCW) and distance from the pivot, in world units
         //  off         release override
+        //  pause 1|0   controller pauses (1) / unpauses (0) the game; also accepts true/false/on/off
+        //  set block_pause 1|0   make it impossible (1) or possible (0, default) for the player to pause
         void ReadCommands()
         {
             while (_rx.Available > 0)
@@ -120,6 +190,16 @@ namespace GoiBridge
                 try
                 {
                     if (p[0] == "off") _mode = Mode.None;
+                    else if (p[0] == "pause" && p.Length >= 2) SetControllerPause(ParseBool(p[1]));
+                    else if (p[0] == "set" && p.Length >= 3)
+                    {
+                        var val = ParseBool(p[2]);
+                        switch (p[1].ToLowerInvariant())
+                        {
+                            case "block_pause": _blockPause = val; if (!val && _sm != null) _sm.canMenu = true; break;
+                            default: Plugin.Instance.Log.LogWarning("unknown setting: " + p[1]); break;
+                        }
+                    }
                     else if (p[0] == "X" && p.Length >= 2) _method = int.Parse(p[1], CultureInfo.InvariantCulture);
                     else if (p.Length >= 3)
                     {
@@ -185,6 +265,10 @@ namespace GoiBridge
             sb.Append("{\"t\":").Append(F(Time.unscaledTime));
             sb.Append(",\"sw\":").Append(Screen.width).Append(",\"sh\":").Append(Screen.height);
             sb.Append(",\"ov\":").Append(_mode != Mode.None ? "true" : "false");
+            sb.Append(",\"bp\":").Append(_blockPause ? "true" : "false");      // setting: block_pause
+            sb.Append(",\"pz\":").Append(_ctrlPaused ? "true" : "false");      // paused by the controller
+            sb.Append(",\"ts\":").Append(F(Time.timeScale));                      // Time.timeScale
+            if (_pc != null) sb.Append(",\"mp\":").Append(_pc.menuPause ? "true" : "false"); // game's own menu-pause flag
             sb.Append(",\"fo\":").Append(Application.isFocused ? "true" : "false");     // window focused?
             sb.Append(",\"bg\":").Append(Application.runInBackground ? "true" : "false"); // keeps running unfocused?
             if (_pc != null)
@@ -235,7 +319,9 @@ namespace GoiBridge
                 sb.AppendLine("sj on '" + sj.gameObject.name + "' pos=" + sj.transform.position + " translation=" + sj.jointTranslation);
                 sb.AppendLine("hammerCollider on '" + _pc.hammerCollider.gameObject.name + "'");
             }
-            else sb.AppendLine("PlayerControl NOT found (load into the game first)");
+            if (_sm != null) sb.AppendLine("SettingsManager on '" + _sm.gameObject.name + "' canMenu=" + _sm.canMenu);
+            sb.AppendLine("timeScale=" + Time.timeScale + " blockPause=" + _blockPause + " ctrlPaused=" + _ctrlPaused);
+            if (_pc == null) sb.AppendLine("PlayerControl NOT found (load into the game first)");
             var path = Path.Combine(Paths.BepInExRootPath, "goi_dump.txt");
             File.WriteAllText(path, sb.ToString());
             Plugin.Instance.Log.LogInfo("Dump written to " + path);

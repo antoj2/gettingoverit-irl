@@ -1,6 +1,4 @@
 # pyright: basic
-from dataclasses import dataclass
-import json
 import os
 from typing import Any, Self
 import cv2
@@ -14,7 +12,6 @@ import math
 base_options = python.BaseOptions(
     model_asset_path="pose_landmarker_full.task",
 )
-# 1. FIX: Changed running_mode to VIDEO to activate continuous temporal tracking
 options = vision.PoseLandmarkerOptions(
     base_options=base_options,
     running_mode=vision.RunningMode.VIDEO,
@@ -73,6 +70,9 @@ class Point:
 
     def length(self) -> float:
         return math.sqrt(self.x**2 + self.y**2)
+
+    def dot(self, rhs: Self) -> float:
+        return self.x * rhs.x + self.y * rhs.y
 
 
 def average_hand(a: Point, b: Point, c: Point):
@@ -199,6 +199,20 @@ def main() -> None:
                 shoulder_dist = left_shoulder.dist(right_shoulder)
                 hand_dist = left.dist(right)
 
+                # if hand_dist > shoulder_dist:
+                #     frame = cv2.flip(frame, 1)
+                #     cv2.putText(
+                #         frame,
+                #         "Dine hænder må ikke være mere end 1 skuldrelængde fra hinanden",
+                #         (100, 100),
+                #         cv2.FONT_HERSHEY_SIMPLEX,
+                #         1,
+                #         (255, 0, 0),
+                #         2,
+                #     )
+                #     frame = cv2.flip(frame, 1)
+                #     break
+                #
                 shoulder_mid = left_shoulder.midpoint(right_shoulder)
 
                 thingy = shoulder_dist / 10
@@ -209,40 +223,69 @@ def main() -> None:
                 )
                 perp_unit = perp / perp.length()
 
-                maybe_chest_mid = shoulder_mid + (perp_unit * thingy)
+                chest_mid = shoulder_mid + (perp_unit * thingy)
                 cv2.circle(
                     frame,
-                    maybe_chest_mid.as_tuple_int(),
+                    chest_mid.as_tuple_int(),
                     5,
                     (255, 255, 255),
                     cv2.FILLED,
                 )
 
-                if hand_dist > shoulder_dist:
-                    frame = cv2.flip(frame, 1)
-                    cv2.putText(
-                        frame,
-                        "Dine hænder må ikke være mere end 1 skuldrelængde fra hinanden",
-                        (100, 100),
-                        cv2.FONT_HERSHEY_SIMPLEX,
-                        1,
-                        (255, 0, 0),
-                        2,
-                    )
-                    frame = cv2.flip(frame, 1)
-                    break
-
-                print(
-                    json.dumps({"left": {"x": left.x, "y": left.y}}),
-                    flush=True,
-                )
-                print(
-                    json.dumps({"right": {"x": right.x, "y": right.y}}),
-                    flush=True,
-                )
+                # print(
+                #     json.dumps({"left": {"x": left.x, "y": left.y}}),
+                #     flush=True,
+                # )
+                # print(
+                #     json.dumps({"right": {"x": right.x, "y": right.y}}),
+                #     flush=True,
+                # )
 
                 mid_hands = left.midpoint(right)
                 cv2.circle(frame, mid_hands.as_tuple_int(), 5, (0, 255, 0), cv2.FILLED)
+
+                shoulder_to_shoulder = Point(
+                    right_shoulder.x - left_shoulder.x,
+                    right_shoulder.y - left_shoulder.y,
+                )
+
+                shoulder_mid_to_mid_hands = Point(
+                    shoulder_mid.x - mid_hands.x, shoulder_mid.y - mid_hands.y
+                )
+
+                angle = math.acos(
+                    shoulder_to_shoulder.dot(shoulder_mid_to_mid_hands)
+                    / (
+                        shoulder_to_shoulder.length()
+                        * shoulder_mid_to_mid_hands.length()
+                    )
+                )
+
+                shoulder_angle = math.atan2(
+                    shoulder_to_shoulder.y, shoulder_to_shoulder.x
+                )
+
+                frame = cv2.flip(frame, 1)
+                cv2.putText(
+                    frame,
+                    f"{angle}",
+                    (100, 100),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    1,
+                    (255, 0, 0),
+                    2,
+                )
+
+                cv2.putText(
+                    frame,
+                    f"Shoulder angle: {shoulder_angle}",
+                    (100, 120),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    1,
+                    (255, 0, 0),
+                    2,
+                )
+                frame = cv2.flip(frame, 1)
 
                 cv2.circle(
                     frame,
@@ -271,7 +314,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
-# Midterpunkt mellem hænder
-# Afstand mellem chest midte og middle hænder
-# ^ Divider med w

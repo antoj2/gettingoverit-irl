@@ -22,7 +22,7 @@ uint32_t lastBatteryCheck = 0;
 uint8_t batteryLevel = 100;
 
 void loop() {
-  if (myCodeCell.Run(10)) {
+  if (myCodeCell.Run(100)) {
     if (millis() - lastBatteryCheck > 30000) {
       batteryLevel = myCodeCell.BatteryLevelRead();
       lastBatteryCheck = millis();
@@ -34,12 +34,11 @@ void loop() {
 
 
     // send over wifi
-    if (WiFi.softAPgetStationNum() > 0) {
-      udp.beginPacket(computerIP, port);
-      udp.print(tilt);
-      udp.print(",");
-      udp.print(batteryLevel);
-      udp.endPacket();
-    }
+    udp.beginPacket(computerIP, port);
+    udp.print(tilt);
+    udp.print(",");
+    udp.print(batteryLevel);
+    udp.endPacket();
+  
   }
 }

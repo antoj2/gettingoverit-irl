@@ -55,6 +55,8 @@ namespace GoiBridge
         bool _blockPause;           // set block_pause 1: the player cannot open the pause menu / pause the game
         bool _ctrlPaused;           // pause 1: the controller has paused the game
         float _ctrlSavedScale = 1f; // Time.timeScale to restore on 'pause 0'
+        bool _ctrlMenu;             // pause_menu 1: the controller opened the game's own pause menu
+        float _menuCmdCooldown;     // ignore menu state right after a toggle, the game needs a frame or two to update
         SettingsManager _sm;
         float _nextSmLookup, _nextBlockLog;
 
@@ -124,11 +126,13 @@ namespace GoiBridge
         // layer 2 closes it again (through the game's own ToggleMenu) if it got opened anyway.
         void EnforceNoPause()
         {
+            // keep the 'opened by the controller' flag in sync, also when block_pause is off (the player may close the menu with Esc)
+            if (_ctrlMenu && _pc != null && Time.unscaledTime > _menuCmdCooldown && !_pc.menuPause) _ctrlMenu = false;
             if (!_blockPause) return;
             LookupSm();
             if (_sm != null) _sm.canMenu = false;
             if (_ctrlPaused || _pc == null) return;
-            if (_pc.menuPause)
+            if (_pc.menuPause && !_ctrlMenu && Time.unscaledTime > _menuCmdCooldown)
             {
                 if (_sm != null) _sm.ToggleMenu();
                 else _pc.UnPause();
@@ -145,6 +149,22 @@ namespace GoiBridge
         {
             try { EnforceNoPause(); }
             catch (Exception e) { Plugin.Instance.Log.LogWarning("EnforceNoPause: " + e.Message); }
+        }
+
+        // Opens/closes the game's own pause menu (same as pressing Esc) through its ToggleMenu().
+        // Works regardless of block_pause: with block_pause 1 only the controller can close it again.
+        void SetPauseMenu(bool open)
+        {
+            LookupSm(); Lookup();
+            if (_sm == null || _pc == null) { Plugin.Instance.Log.LogWarning("pause_menu: game not ready (SettingsManager/PlayerControl not found)"); return; }
+            if (Time.unscaledTime < _menuCmdCooldown) return;
+            if (_pc.menuPause == open) { _ctrlMenu = open; return; }   // already in the requested state
+            _ctrlMenu = open;                                          // set first so the block_pause watchdog leaves it alone
+            _menuCmdCooldown = Time.unscaledTime + 0.3f;
+            var old = _sm.canMenu;
+            _sm.canMenu = true;                                        // in case ToggleMenu itself checks the flag
+            _sm.ToggleMenu();
+            _sm.canMenu = _blockPause ? false : old;
         }
 
         void SetControllerPause(bool pause)
@@ -180,6 +200,7 @@ namespace GoiBridge
         //  H deg ext   hammer angle (degrees, 0 = +x, CCW) and distance from the pivot, in world units
         //  off         release override
         //  pause 1|0   controller pauses (1) / unpauses (0) the game; also accepts true/false/on/off
+        //  pause_menu 1|0   open (1) / close (0) the game's own pause menu, like pressing Esc
         //  set block_pause 1|0   make it impossible (1) or possible (0, default) for the player to pause
         void ReadCommands()
         {
@@ -191,6 +212,7 @@ namespace GoiBridge
                 {
                     if (p[0] == "off") _mode = Mode.None;
                     else if (p[0] == "pause" && p.Length >= 2) SetControllerPause(ParseBool(p[1]));
+                    else if (p[0] == "pause_menu" && p.Length >= 2) SetPauseMenu(ParseBool(p[1]));
                     else if (p[0] == "set" && p.Length >= 3)
                     {
                         var val = ParseBool(p[2]);
@@ -267,6 +289,7 @@ namespace GoiBridge
             sb.Append(",\"ov\":").Append(_mode != Mode.None ? "true" : "false");
             sb.Append(",\"bp\":").Append(_blockPause ? "true" : "false");      // setting: block_pause
             sb.Append(",\"pz\":").Append(_ctrlPaused ? "true" : "false");      // paused by the controller
+            sb.Append(",\"pm\":").Append(_ctrlMenu ? "true" : "false");      // pause menu opened by the controller
             sb.Append(",\"ts\":").Append(F(Time.timeScale));                      // Time.timeScale
             if (_pc != null) sb.Append(",\"mp\":").Append(_pc.menuPause ? "true" : "false"); // game's own menu-pause flag
             sb.Append(",\"fo\":").Append(Application.isFocused ? "true" : "false");     // window focused?

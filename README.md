@@ -6,7 +6,8 @@ This repository is client-side and controller-side code that let's you control t
 
 # Codecell
 
-coming soon
+The codecell's position tracking is extremely ineffective due to it only tracking the acceleration, it was therefore decided not to proceed with this approach.
+The code used is still available to read but is not used for any function.
 
 ---
 

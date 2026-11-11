@@ -148,11 +148,18 @@ def text(id: str, t: str, achor: Point, srW: int, srH: int, color: str, size: fl
         "ttl": TTL_MS,
     }
 
+def command(cmd: str, input: dict = {}) -> dict:
+    input["cmd"] = cmd
+    return input
 
-def send(items: list[dict]) -> None:
-    if items:
-        msg = json.dumps({"cmd": "batch", "items": items}, separators=(",", ":"))
-        _sock.sendto(msg.encode() + b"\n", OVERLAY_ADDR)
+def jsonCommand(cmd: dict | list[dict] = {}) -> str:
+    if isinstance(cmd, dict):
+        return json.dumps(cmd, separators=(",", ":"))
+    return "\n".join(json.dumps(ting, separators=(",", ":")) for ting in cmd)
+
+def send(commands: list[dict]) -> None:
+    if commands:
+        _sock.sendto(jsonCommand(commands).encode() + b"\n", OVERLAY_ADDR)
 
 
 def validate_camera(index: int) -> bool:
@@ -211,6 +218,7 @@ def main() -> None:
 
         h, w, _ = frame.shape
         items: list[dict] = []
+        commands: list[dict] = [command("clear")]
 
         if detection_result.pose_landmarks:
             for pose_landmarks in detection_result.pose_landmarks:
@@ -375,7 +383,8 @@ def main() -> None:
                 items.append(dot("right_hand", right, w, h, "#ff0000"))
                 items.append(dot("left_hand", left, w, h, "#ff0000"))
 
-        send(items)
+        commands.append(command("batch", {"items": items}))
+        send(commands)
 
         flipped = cv2.flip(frame, 1)
 

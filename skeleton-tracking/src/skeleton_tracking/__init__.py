@@ -38,8 +38,10 @@ def interpolate_color(color1: str, color2: str, factor: float) -> str:
     Returns:
         Interpolated hex color.
     """
-    if not 0.0 <= factor <= 1.0:
-        raise ValueError("factor must be between 0.0 and 1.0")
+    if factor < 0:
+        return color1
+    if factor > 1:
+        return color2
 
     def parse_color(color: str) -> tuple[int, ...]:
         color = color.lstrip("#")
@@ -116,7 +118,7 @@ class Point:
         return self.x * rhs.x + self.y * rhs.y
 
     def inside_bounds(self, x1, y1, x2, y2) -> bool:
-        return (self.x >= x1 or self.x <= x2 or self.y >= y1 or self.y <= y2)
+        return (self.x >= x1 and self.x <= x2 and self.y >= y1 and self.y <= y2)
 
     def __str__(self):
         return f"({self.x}, {self.y})"
@@ -132,16 +134,14 @@ def average_point(points: list[Point]) -> Point:
 
 
 # --- Overlay output -------------------------------------------------------
-# Dots are sent as JSON over UDP to the overlay instead of being drawn on the frame.
+# Commands are sent as JSON over UDP to the overlay instead of being drawn on the frame.
 OVERLAY_ADDR = ("127.0.0.1", int(os.environ.get("OVERLAY_PORT", "45454")))
 MIRROR = True  # the camera view is mirrored for the player, like the old flipped frame
-TTL_MS = 250  # dots vanish by themselves if tracking stops sending updates
+TTL_MS = 250  # drawn items vanish by themselves if tracking stops sending updates after this time
 _sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 
 
 def dot(id: str, p: Point, srW: int, srH: int, color: str, r: float = 0.006) -> dict:
-    """A circle for the overlay. p is in camera pixels; the overlay wants 0..1 fractions
-    of the screen (x by width, y by height, r by height)."""
     x = p.x / srW
     if MIRROR:
         x = 1 - x
@@ -174,7 +174,7 @@ def line(id: str, p1: Point, p2: Point, srW: int, srH: int, color: str, width: f
         "ttl": TTL_MS,
     }
 
-def text(id: str, t: str, achor: Point, srW: int, srH: int, color: str, size: float = 0.01, align: str = "center", bg_color: str = "#a00000000", bold: bool = False) -> dict:
+def text(id: str, t: str, achor: Point, srW: int, srH: int, color: str, size: float = 0.01, align: str = "center", bg_color: str = "#00000000", bold: bool = False) -> dict:
     x = achor.x / srW
     if MIRROR:
         x = 1 - x
@@ -229,11 +229,8 @@ def get_camera_index() -> int:
         print("Det kamera eksisterer ikke")
 
 # --- Find Points ----------------------------------------------------------
-def findPoints(cap: cv2.VideoCapture, detector: Any) -> dict[str, Point] | None:
+def findPoints(frame: cv2.typing.MatLike, detector: Any = vision.PoseLandmarker.create_from_options(options)) -> dict[str, Point] | None:
     """Returns (leftHand, rightHand, leftShoulder, rightShoulder, centerOfBody)"""
-    ret, frame = cap.read()
-    if not ret:
-        return
     h, w, _ = frame.shape
 
     rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
@@ -245,11 +242,6 @@ def findPoints(cap: cv2.VideoCapture, detector: Any) -> dict[str, Point] | None:
 
     if detection_result.pose_landmarks:
         for pose_landmarks in detection_result.pose_landmarks:
-            # if "DEBUG" in os.environ and os.environ.get("DEBUG") == "true":
-            #     for i, landmark in enumerate(pose_landmarks):
-            #         lm = Point(landmark.x * w, landmark.y * h)
-            #         items.append(dot(f"lm{i}", lm, w, h, "#0000ff", 0.004))
-
             left_hand = average_point([
                 Point.from_landmark(pose_landmarks[15]),
                 Point.from_landmark(pose_landmarks[17]),
@@ -280,52 +272,75 @@ def findPoints(cap: cv2.VideoCapture, detector: Any) -> dict[str, Point] | None:
                 }
 
 # --- Main -----------------------------------------------------------------
-def construct(points: dict[str, Point], w: int, h: int) -> list[dict]:
+def collect_errors(points: dict[str, Point], w: int, h: int) -> list[str]:
+    errors: list[str] = []
+    def p(s: str) -> Point:
+        return points[s]
+    
+    if (not p("left_hand").inside_bounds(0,0,w,h) or not p("right_hand").inside_bounds(0,0,w,h)):
+        errors.append("hands_outside")
+    if (not p("left_shoulder").inside_bounds(0,0,w,h) or not p("right_shoulder").inside_bounds(0,0,w,h)):
+        errors.append("shoulders_outside")
+    shoulder_dist = p("left_shoulder").dist(p("right_shoulder"))
+    MAX_ARM = shoulder_dist * 2.2
+    if (not p("left_shoulder").inside_bounds(MAX_ARM,MAX_ARM,w-MAX_ARM,h-MAX_ARM) or not p("right_shoulder").inside_bounds(MAX_ARM,MAX_ARM,w-MAX_ARM,h-MAX_ARM)):
+        errors.append("too_close")
+    hand_dist = p("left_hand").dist(p("right_hand"))
+    if hand_dist > shoulder_dist:
+        errors.append("hands_together")
+    
+    return errors
+
+def display_errors(errors: list[str], points: dict[str, Point], w: int, h: int) -> list[dict]:
+    items: list[dict] = []
+    def p(s: str) -> Point:
+        return points[s]
+    offset = 0.01
+    SIZE = 0.04
+    if "too_close" in errors:
+        items.append(text("too_close", "Du står for tæt på kameraet", Point(w/2, offset * h), w, h, "#FFFFFF", SIZE, "center", "#20990000"))
+        offset += SIZE * 1.5
+    if "hands_outside" in errors:
+        items.append(text("hands_outside", "Dine hænder skal være inden for billedet", Point(w/2, offset * h), w, h, "#FFFFFF", SIZE, "center","#20990000"))
+        offset += SIZE * 1.5
+    if "shoulders_outside" in errors:
+        items.append(text("shoulders_outside", "Dine skuldre skal være inden for billedet", Point(w/2, offset * h), w, h, "#FFFFFF", SIZE, "center", "#20990000"))
+        offset += SIZE * 1.5
+    if "hands_together" in errors:
+        items.append(text("hands_together", "Dine hænder må ikke være mere end 1 skuldrelængde fra hinanden", Point(w/2, offset * h), w, h, "#FFFFFF", SIZE, "center", "#20990000"))
+        items.append(dot("right_hand", p("right_hand"), w, h, "#ff0000", r = 0.01))
+        items.append(dot("left_hand", p("left_hand"), w, h, "#ff0000", r = 0.01))
+        offset += SIZE * 1.5
+    
+    return items
+
+def construct(points: dict[str, Point], mode: str, w: int, h: int) -> list[dict]:
     items: list[dict] = []
 
     def p(s: str) -> Point:
         return points[s]
 
-    # Checks if hands are outside of bounds
-    if (not p("left_hand").inside_bounds(0,0,w,h) or not p("right_hand").inside_bounds(0,0,w,h)):
-        items.append(text("hands_outside", "Dine hænder skal være inden for billedet", Point(w/2,0), w, h, "#FFFFFF", bg_color="#a20000000", size = 0.04))
-        return items
-    
-    # Checks if shoulders are outside of bounds
-    if (not p("left_shoulder").inside_bounds(0,0,w,h) or not p("right_shoulder").inside_bounds(0,0,w,h)):
-        items.append(text("shoulders_outside", "Dine skuldre skal være inden for billedet", Point(w/2,0), w, h, "#FFFFFF", bg_color="#a20000000", size = 0.04))
-        return items
-    
-    shoulder_dist = p("left_shoulder").dist(p("right_shoulder"))
-    hand_dist = p("left_hand").dist(p("right_hand"))
-    
-    # Checks if hands are further apart than shoulders
-    if hand_dist > shoulder_dist:
-        items.append(text("hands_together", "Dine hænder må ikke være mere end 1 skuldrelængde fra hinanden", Point(w/2,0), w, h, "#FFFFFF", bg_color="#a20000000", size = 0.04))
-        items.append(dot("right_hand", p("right_hand"), w, h, "#ff0000", r = 0.01))
-        items.append(dot("left_hand", p("left_hand"), w, h, "#ff0000", r = 0.01))
-        return items
-    
     items.append(line("shoulders", p("left_shoulder"), p("right_shoulder"), w, h, "#B0310874"))
     items.append(dot("shoulder1", p("left_shoulder"), w, h, "#3b2fdd"))
     items.append(dot("shoulder2", p("right_shoulder"), w, h, "#3b2fdd"))
     
-    shoulder_mid = p("left_shoulder").midpoint(p("right_shoulder"))
-    
+    SHOULDER_MID = p("left_shoulder").midpoint(p("right_shoulder"))
+    SHOULDER_DIST = p("left_shoulder").dist(p("right_shoulder"))
+    HAND_DIST = p("left_hand").dist(p("right_hand"))
     # How much to move it down by
-    hmtmidb = shoulder_dist / 2
+    HMTMIDB = SHOULDER_DIST / 2
     
-    perp = Point(
+    PERP = Point(
         -(p("right_shoulder").y - p("left_shoulder").y),
         p("right_shoulder").x - p("left_shoulder").x,
     )
-    perp_unit = perp / perp.length()
+    PERP_UNIT = PERP / PERP.length()
     
-    chest_mid = shoulder_mid + (perp_unit * hmtmidb)
-    items.append(dot("chest_mid", chest_mid, w, h, "#ffffff"))
+    CHEST_MID = SHOULDER_MID + (PERP_UNIT * HMTMIDB)
+    items.append(dot("chest_mid", CHEST_MID, w, h, "#ffffff"))
     
     mid_hands = p("left_hand").midpoint(p("right_hand"))
-    items.append(dot("mid_hands", mid_hands, w, h, interpolate_color("#00FF00", "#FF0000", hand_dist/shoulder_dist)))
+    items.append(dot("mid_hands", mid_hands, w, h, interpolate_color("#00FF00", "#FF0000", HAND_DIST/SHOULDER_DIST)))
     
     shoulder_to_shoulder = Point(
         p("right_shoulder").x - p("left_shoulder").x,
@@ -333,10 +348,10 @@ def construct(points: dict[str, Point], w: int, h: int) -> list[dict]:
     )
     
     shoulder_mid_to_mid_hands = Point(
-        shoulder_mid.x - mid_hands.x, shoulder_mid.y - mid_hands.y
+        SHOULDER_MID.x - mid_hands.x, SHOULDER_MID.y - mid_hands.y
     )
     
-    angle = math.acos(
+    ANGLE = math.acos(
         shoulder_to_shoulder.dot(shoulder_mid_to_mid_hands)
         / (
             shoulder_to_shoulder.length()
@@ -344,12 +359,12 @@ def construct(points: dict[str, Point], w: int, h: int) -> list[dict]:
         )
     )
     
-    shoulder_angle = math.atan2(
+    SHOULDER_ANGLE = math.atan2(
         shoulder_to_shoulder.y, shoulder_to_shoulder.x
     )
 
-    items.append(text("angle", f"Vinkel af hammer: {angle}", Point(w,0.03 * h), w, h, "#FFFFFF", bg_color="#a20000000", size = 0.02, align="left"))
-    items.append(text("shoulder_angle", f"Vinkel af skuldre: {shoulder_angle}", Point(w,0), w, h, "#FFFFFF", bg_color="#a20000000", size = 0.02, align="left"))
+    items.append(text("angle", f"Vinkel af hammer: {ANGLE}", Point(w,0.03 * h), w, h, "#FFFFFF", bg_color="#a20000000", size = 0.02, align="left"))
+    items.append(text("shoulder_angle", f"Vinkel af skuldre: {SHOULDER_ANGLE}", Point(w,0), w, h, "#FFFFFF", bg_color="#a20000000", size = 0.02, align="left"))
     
     return items
 
@@ -370,22 +385,26 @@ def main() -> None:
         cam_index = get_camera_index()
 
     # Optains frame
-    detector = vision.PoseLandmarker.create_from_options(options)
     cap = cv2.VideoCapture(cam_index)
     ret, frame = cap.read()
     if not ret:
         return
     h, w, _ = frame.shape
 
+    mode = "setup"
+
     # Main Loop
     while cap.isOpened():
         # Optains Points from frame
-        points = findPoints(cap, detector)
+        ret, frame = cap.read()
+        if not ret:
+            continue
+        points = findPoints(frame)
         if (not points):
             continue
 
         # Sends commands to overlay
-        send([command("clear"), command("batch", {"items": construct(points, w, h)})])
+        send([command("clear"), command("batch", {"items": construct(points, mode, w, h) + display_errors(collect_errors(points, w, h), points, w, h)})])
 
         if cv2.waitKey(1) == ord("q"):
             break

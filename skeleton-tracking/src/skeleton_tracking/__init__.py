@@ -72,47 +72,39 @@ def interpolate_color(color1: str, color2: str, factor: float) -> str:
 class Point:
     x: float
     y: float
-    z: float | None
 
-    def __init__(self, x: float, y: float, z: float | None = None) -> None:
+    def __init__(self, x: float, y: float) -> None:
         self.x = x
         self.y = y
-        self.z = z
 
     def __truediv__(self, other: float) -> Self:
-        return type(self)(self.x / other, self.y / other, None)
+        return type(self)(self.x / other, self.y / other)
 
     def __add__(self, other: Self) -> Self:
-        return type(self)(self.x + other.x, self.y + other.y, None)
+        return type(self)(self.x + other.x, self.y + other.y)
 
     def __mul__(self, other: float) -> Self:
-        return type(self)(self.x * other, self.y * other, None)
+        return type(self)(self.x * other, self.y * other)
 
     @classmethod
     def from_landmark(cls, lm: Any) -> Self:
-        return cls(lm.x, lm.y, lm.z)
+        return cls(lm.x, lm.y)
 
     @classmethod
-    def from_tuple(cls, tup: Any) -> Self:
-        return cls(tup[0], tup[1], tup[2])
+    def from_tuple(cls, tup: tuple[float, float]) -> Self:
+        return cls(tup[0], tup[1])
 
     def midpoint(self, rhs: Self) -> Self:
-        return type(self)((self.x + rhs.x) / 2, (self.y + rhs.y) / 2, None)
+        return type(self)((self.x + rhs.x) / 2, (self.y + rhs.y) / 2)
 
     def correct(self, w: int, h: int) -> Self:
-        return type(self)(self.x * w, self.y * h, None)
+        return type(self)(self.x * w, self.y * h)
 
     def as_tuple(self) -> tuple[float, float] | tuple[float, float, float]:
-        if self.z is not None:
-            return (self.x, self.y, self.z)
-        else:
-            return (self.x, self.y)
+        return (self.x, self.y)
 
     def as_tuple_int(self) -> tuple[int, int] | tuple[int, int, int]:
-        if self.z is not None:
-            return (int(self.x), int(self.y), int(self.z))
-        else:
-            return (int(self.x), int(self.y))
+        return (int(self.x), int(self.y))
 
     def dist(self, rhs: Self) -> float:
         return math.dist(self.as_tuple(), rhs.as_tuple())
@@ -127,18 +119,12 @@ class Point:
         return (self.x >= x1 or self.x <= x2 or self.y >= y1 or self.y <= y2)
 
     def __str__(self):
-        if self.z == None:
-            return f"({self.x}, {self.y})"
-        return f"({self.x}, {self.y}, {self.z})"
+        return f"({self.x}, {self.y})"
 
 def average_hand(a: Point, b: Point, c: Point):
     x = (a.x + b.x + c.x) / 3
     y = (a.y + b.y + c.y) / 3
-    z = None
-    if a.z is not None and b.z is not None and c.z is not None:
-        z = (a.z + b.z + c.z) / 3
-
-    return Point(x, y, z)
+    return Point(x, y)
 
 
 # --- Overlay output -------------------------------------------------------
@@ -240,7 +226,7 @@ def get_camera_index() -> int:
 
 # --- Find Points ----------------------------------------------------------
 def findPoints(cap: cv2.VideoCapture, detector: Any) -> tuple[Point, Point, Point, Point] | None:
-    """Returns (leftHand, rightHand, leftShoulder, rightShoulder, *centerOfBody)"""
+    """Returns (leftHand, rightHand, leftShoulder, rightShoulder, centerOfBody)"""
     ret, frame = cap.read()
     if not ret:
         return

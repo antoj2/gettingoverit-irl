@@ -121,10 +121,14 @@ class Point:
     def __str__(self):
         return f"({self.x}, {self.y})"
 
-def average_hand(a: Point, b: Point, c: Point):
-    x = (a.x + b.x + c.x) / 3
-    y = (a.y + b.y + c.y) / 3
-    return Point(x, y)
+def average_point(points: list[Point]) -> Point:
+    if not points:
+        raise ValueError("Cannot calculate the average of an empty list")
+    n = len(points)
+    return Point(
+        x=sum(p.x for p in points) / n,
+        y=sum(p.y for p in points) / n
+    )
 
 
 # --- Overlay output -------------------------------------------------------
@@ -225,7 +229,7 @@ def get_camera_index() -> int:
         print("Det kamera eksisterer ikke")
 
 # --- Find Points ----------------------------------------------------------
-def findPoints(cap: cv2.VideoCapture, detector: Any) -> tuple[Point, Point, Point, Point] | None:
+def findPoints(cap: cv2.VideoCapture, detector: Any) -> dict[str, Point] | None:
     """Returns (leftHand, rightHand, leftShoulder, rightShoulder, centerOfBody)"""
     ret, frame = cap.read()
     if not ret:
@@ -246,70 +250,86 @@ def findPoints(cap: cv2.VideoCapture, detector: Any) -> tuple[Point, Point, Poin
             #         lm = Point(landmark.x * w, landmark.y * h)
             #         items.append(dot(f"lm{i}", lm, w, h, "#0000ff", 0.004))
 
-            left = average_hand(
-                Point.from_landmark(pose_landmarks[15]).correct(w, h),
-                Point.from_landmark(pose_landmarks[17]).correct(w, h),
-                Point.from_landmark(pose_landmarks[19]).correct(w, h),
-            )
-            right = average_hand(
-                Point.from_landmark(pose_landmarks[16]).correct(w, h),
-                Point.from_landmark(pose_landmarks[18]).correct(w, h),
-                Point.from_landmark(pose_landmarks[20]).correct(w, h),
-            )
+            left_hand = average_point([
+                Point.from_landmark(pose_landmarks[15]),
+                Point.from_landmark(pose_landmarks[17]),
+                Point.from_landmark(pose_landmarks[19]),
+            ]).correct(w, h)
+            right_hand = average_point([
+                Point.from_landmark(pose_landmarks[16]),
+                Point.from_landmark(pose_landmarks[18]),
+                Point.from_landmark(pose_landmarks[20]),
+            ]).correct(w, h)
 
             left_shoulder = Point.from_landmark(pose_landmarks[12]).correct(w, h)
             right_shoulder = Point.from_landmark(pose_landmarks[11]).correct(w, h)
 
-            return (left, right, left_shoulder, right_shoulder)
+            body = average_point([
+                Point.from_landmark(pose_landmarks[11]),
+                Point.from_landmark(pose_landmarks[12]),
+                Point.from_landmark(pose_landmarks[23]),
+                Point.from_landmark(pose_landmarks[24]),
+            ]).correct(w, h)
+
+            return {
+                "left_hand": left_hand,
+                "right_hand": right_hand,
+                "left_shoulder": left_shoulder,
+                "right_shoulder": right_shoulder,
+                "body": body
+                }
 
 # --- Main -----------------------------------------------------------------
-def construct(left_hand: Point, right_hand: Point, left_shoulder: Point, right_shoulder: Point, w: int, h: int) -> list[dict]:
+def construct(points: dict[str, Point], w: int, h: int) -> list[dict]:
     items: list[dict] = []
 
+    def p(s: str) -> Point:
+        return points[s]
+
     # Checks if hands are outside of bounds
-    if (not left_hand.inside_bounds(0,0,w,h) or not right_hand.inside_bounds(0,0,w,h)):
+    if (not p("left_hand").inside_bounds(0,0,w,h) or not p("right_hand").inside_bounds(0,0,w,h)):
         items.append(text("hands_outside", "Dine hænder skal være inden for billedet", Point(w/2,0), w, h, "#FFFFFF", bg_color="#a20000000", size = 0.04))
         return items
     
     # Checks if shoulders are outside of bounds
-    if (not left_shoulder.inside_bounds(0,0,w,h) or not right_shoulder.inside_bounds(0,0,w,h)):
+    if (not p("left_shoulder").inside_bounds(0,0,w,h) or not p("right_shoulder").inside_bounds(0,0,w,h)):
         items.append(text("shoulders_outside", "Dine skuldre skal være inden for billedet", Point(w/2,0), w, h, "#FFFFFF", bg_color="#a20000000", size = 0.04))
         return items
     
-    shoulder_dist = left_shoulder.dist(right_shoulder)
-    hand_dist = left_hand.dist(right_hand)
+    shoulder_dist = p("left_shoulder").dist(p("right_shoulder"))
+    hand_dist = p("left_hand").dist(p("right_hand"))
     
     # Checks if hands are further apart than shoulders
     if hand_dist > shoulder_dist:
         items.append(text("hands_together", "Dine hænder må ikke være mere end 1 skuldrelængde fra hinanden", Point(w/2,0), w, h, "#FFFFFF", bg_color="#a20000000", size = 0.04))
-        items.append(dot("right_hand", right_hand, w, h, "#ff0000", r = 0.01))
-        items.append(dot("left_hand", left_hand, w, h, "#ff0000", r = 0.01))
+        items.append(dot("right_hand", p("right_hand"), w, h, "#ff0000", r = 0.01))
+        items.append(dot("left_hand", p("left_hand"), w, h, "#ff0000", r = 0.01))
         return items
     
-    items.append(line("shoulders", left_shoulder, right_shoulder, w, h, "#B0310874"))
-    items.append(dot("shoulder1", left_shoulder, w, h, "#3b2fdd"))
-    items.append(dot("shoulder2", right_shoulder, w, h, "#3b2fdd"))
+    items.append(line("shoulders", p("left_shoulder"), p("right_shoulder"), w, h, "#B0310874"))
+    items.append(dot("shoulder1", p("left_shoulder"), w, h, "#3b2fdd"))
+    items.append(dot("shoulder2", p("right_shoulder"), w, h, "#3b2fdd"))
     
-    shoulder_mid = left_shoulder.midpoint(right_shoulder)
+    shoulder_mid = p("left_shoulder").midpoint(p("right_shoulder"))
     
     # How much to move it down by
     hmtmidb = shoulder_dist / 2
     
     perp = Point(
-        -(right_shoulder.y - left_shoulder.y),
-        right_shoulder.x - left_shoulder.x,
+        -(p("right_shoulder").y - p("left_shoulder").y),
+        p("right_shoulder").x - p("left_shoulder").x,
     )
     perp_unit = perp / perp.length()
     
     chest_mid = shoulder_mid + (perp_unit * hmtmidb)
     items.append(dot("chest_mid", chest_mid, w, h, "#ffffff"))
     
-    mid_hands = left_hand.midpoint(right_hand)
+    mid_hands = p("left_hand").midpoint(p("right_hand"))
     items.append(dot("mid_hands", mid_hands, w, h, interpolate_color("#00FF00", "#FF0000", hand_dist/shoulder_dist)))
     
     shoulder_to_shoulder = Point(
-        right_shoulder.x - left_shoulder.x,
-        right_shoulder.y - left_shoulder.y,
+        p("right_shoulder").x - p("left_shoulder").x,
+        p("right_shoulder").y - p("left_shoulder").y,
     )
     
     shoulder_mid_to_mid_hands = Point(
@@ -363,11 +383,9 @@ def main() -> None:
         points = findPoints(cap, detector)
         if (not points):
             continue
-        left_hand, right_hand, left_shoulder, right_shoulder = points
-        # print(left_hand, right_hand, left_shoulder, right_shoulder)
 
         # Sends commands to overlay
-        send([command("clear"), command("batch", {"items": construct(left_hand, right_hand, left_shoulder, right_shoulder, w, h)})])
+        send([command("clear"), command("batch", {"items": construct(points, w, h)})])
 
         if cv2.waitKey(1) == ord("q"):
             break

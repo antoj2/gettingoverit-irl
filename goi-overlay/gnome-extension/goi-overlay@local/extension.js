@@ -43,6 +43,11 @@ export default class GoiOverlay extends Extension {
         this._monIndex = Main.layoutManager.primaryIndex;
         this._place();
         this._attach();
+        // Fullscreen windows are normally "unredirected" (drawn straight to the screen),
+        // which hides everything the shell draws above them, including this overlay.
+        try { global.compositor.disable_unredirect(); this._unredirectOff = true; } catch (e) {
+            console.error(`goi-overlay: cannot disable unredirect: ${e.message}`);
+        }
         this._monSig = Main.layoutManager.connect('monitors-changed', () => { this._place(); this._area.queue_repaint(); });
         this._evAddr = Gio.InetSocketAddress.new_from_string('127.0.0.1', EVENT_PORT);
 
@@ -67,6 +72,8 @@ export default class GoiOverlay extends Extension {
     }
 
     disable() {
+        if (this._unredirectOff) { try { global.compositor.enable_unredirect(); } catch (_e) { /* ignore */ } }
+        this._unredirectOff = false;
         if (this._monSig) Main.layoutManager.disconnect(this._monSig);
         if (this._timer) GLib.source_remove(this._timer);
         if (this._src) this._src.destroy();

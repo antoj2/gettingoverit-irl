@@ -4,10 +4,17 @@ Transparent, click-through overlay for drawing text/lines/shapes over a game.
 C++17 / Qt 6 (Widgets + Network). Commands arrive as JSON over UDP on 127.0.0.1:45454.
 
 ## Build
+macOS: `brew install qt`, then use Apple's compiler (Homebrew's LLVM clang can break Qt/Objective-C++ builds):
+
+    rm -rf build
+    cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH="$(brew --prefix qt)" \
+          -DCMAKE_CXX_COMPILER=/usr/bin/clang++ -DCMAKE_OBJCXX_COMPILER=/usr/bin/clang++
+    cmake --build build
+
+Linux/Windows:
 
     cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
     cmake --build build
-    # run:
     ./build/goi-overlay --demo
 
 Linux/Wayland needs layer-shell-qt (Debian/Ubuntu: liblayershellqtinterface-dev,
@@ -17,7 +24,6 @@ works, but can't sit above fullscreen windows.
 Options: --port N, --event-port N, --screen N (screens are listed at startup), --rect x,y,w,h (Win/mac/X11 only), --demo
 
 ## Protocol (one JSON object per line/datagram)
-
 Coordinates are fractions: x/w of screen width, y/h/sizes/r/width of screen HEIGHT.
 Colors: "#rrggbb" or "#aarrggbb". Items with the same "id" are replaced. "ttl" = ms until auto-removed.
 
@@ -31,25 +37,23 @@ Colors: "#rrggbb" or "#aarrggbb". Items with the same "id" are replaced. "ttl" =
     {"cmd":"interactive","enabled":true}     overlay receives mouse input instead of passing it through
 
 While interactive, mouse events are sent as JSON lines to UDP 127.0.0.1:45455:
-{"event":"mouse","type":"press|release|move","button":"left|right|middle|none","x":0.5,"y":0.3}
-Listen with: nc -ul 45455 (x by width, y by height, same fractions as drawing)
+    {"event":"mouse","type":"press|release|move","button":"left|right|middle|none","x":0.5,"y":0.3}
+Listen with: nc -ul 45455   (x by width, y by height, same fractions as drawing)
 
-Test: `echo '{"type":"text","x":.5,"y":.5,"text":"hi","align":"center"}' | nc -u -w0 127.0.0.1 45454`
+Test: echo '{"type":"text","x":.5,"y":.5,"text":"hi","align":"center"}' | nc -u -w0 127.0.0.1 45454
 
 ## Platform notes
-
-- Windows: topmost + WS_EX_TRANSPARENT, re-asserted every second. Works over windowed
-  and borderless-fullscreen. It CANNOT draw over _exclusive_ fullscreen (DirectX owns
+* Windows: topmost + WS_EX_TRANSPARENT, re-asserted every second. Works over windowed
+  and borderless-fullscreen. It CANNOT draw over *exclusive* fullscreen (DirectX owns
   the screen) - run the game in windowed/borderless mode.
-- macOS: window level above the menu bar, joins all Spaces, accessory app, so it appears
+* macOS: window level above the menu bar, joins all Spaces, accessory app, so it appears
   over native fullscreen games. Grant nothing special; no permissions needed.
-- Linux/Wayland: uses wlr-layer-shell, OVERLAY layer, empty input region. Works on
+* Linux/Wayland: uses wlr-layer-shell, OVERLAY layer, empty input region. Works on
   KDE Plasma, Sway, Hyprland, other wlroots compositors. On GNOME (Mutter has no
   layer-shell) the Qt app is just a normal window that is hidden whenever the game has
   focus - use the GNOME Shell extension below instead.
 
 ## GNOME (Wayland)
-
 Use the bundled Shell extension instead of the Qt app. Same protocol, same ports;
 colors must be #rrggbb / #aarrggbb. Supports GNOME 45-50.
 

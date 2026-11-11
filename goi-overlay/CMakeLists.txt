@@ -3,6 +3,14 @@ project(GoiOverlay LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_AUTOMOC ON)
 
+if(APPLE AND NOT CMAKE_PREFIX_PATH)
+  execute_process(COMMAND brew --prefix qt OUTPUT_VARIABLE BREW_QT
+                  OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
+  if(BREW_QT)
+    list(APPEND CMAKE_PREFIX_PATH "${BREW_QT}")
+  endif()
+endif()
+
 find_package(Qt6 6.5 REQUIRED COMPONENTS Widgets Network)
 
 set(SRC src/main.cpp src/Overlay.cpp)

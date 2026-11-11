@@ -314,7 +314,7 @@ def main() -> None:
                 shoulder_mid = left_shoulder.midpoint(right_shoulder)
 
                 # How much to move it down by
-                hmtmidb = shoulder_dist / 10
+                hmtmidb = shoulder_dist / 2
 
                 perp = Point(
                     -(right_shoulder.y - left_shoulder.y),

@@ -8,7 +8,7 @@ import mediapipe as mp
 from mediapipe.tasks import python
 from mediapipe.tasks.python import vision
 import math
-
+import time
 
 # Initialize PoseLandmarker
 base_options = python.BaseOptions(
@@ -271,8 +271,8 @@ def findPoints(frame: cv2.typing.MatLike, detector: Any = vision.PoseLandmarker.
                 "body": body
                 }
 
-# --- Main -----------------------------------------------------------------
-def collect_errors(points: dict[str, Point], w: int, h: int) -> list[str]:
+# --- Overlay construction -------------------------------------------------
+def collect_errors(points: dict[str, Point], w: int, h: int, max_arm = 2.2) -> list[str]:
     errors: list[str] = []
     def p(s: str) -> Point:
         return points[s]
@@ -282,9 +282,12 @@ def collect_errors(points: dict[str, Point], w: int, h: int) -> list[str]:
     if (not p("left_shoulder").inside_bounds(0,0,w,h) or not p("right_shoulder").inside_bounds(0,0,w,h)):
         errors.append("shoulders_outside")
     shoulder_dist = p("left_shoulder").dist(p("right_shoulder"))
-    MAX_ARM = shoulder_dist * 2.2
+    MAX_ARM = shoulder_dist * max_arm
     if (not p("left_shoulder").inside_bounds(MAX_ARM,MAX_ARM,w-MAX_ARM,h-MAX_ARM) or not p("right_shoulder").inside_bounds(MAX_ARM,MAX_ARM,w-MAX_ARM,h-MAX_ARM)):
-        errors.append("too_close")
+        if shoulder_dist + MAX_ARM * 2 > w:
+            errors.append("too_close")
+        else:
+            errors.append("not_middle")
     hand_dist = p("left_hand").dist(p("right_hand"))
     if hand_dist > shoulder_dist:
         errors.append("hands_together")
@@ -299,6 +302,9 @@ def display_errors(errors: list[str], points: dict[str, Point], w: int, h: int) 
     SIZE = 0.04
     if "too_close" in errors:
         items.append(text("too_close", "Du står for tæt på kameraet", Point(w/2, offset * h), w, h, "#FFFFFF", SIZE, "center", "#20990000"))
+        offset += SIZE * 1.5
+    if "not_middle" in errors:
+        items.append(text("not_middle", "Du står for ikke i centrum", Point(w/2, offset * h), w, h, "#FFFFFF", SIZE, "center", "#20990000"))
         offset += SIZE * 1.5
     if "hands_outside" in errors:
         items.append(text("hands_outside", "Dine hænder skal være inden for billedet", Point(w/2, offset * h), w, h, "#FFFFFF", SIZE, "center","#20990000"))
@@ -320,6 +326,21 @@ def construct(points: dict[str, Point], mode: str, w: int, h: int) -> list[dict]
     def p(s: str) -> Point:
         return points[s]
 
+    # - Setup ---------------------
+    if mode == "setup":
+        items.append(text("top_text", "Setup", Point(w/2,0), w, h, "#FFFFFF", bg_color="#71000000", size = 0.05, bold = True))
+        errors = collect_errors(points, w, h, max_arm = 2.3)
+        if "shoulders_outside" in errors:
+            items.append(text("helper", "Du er ikke tilstrækeligt synlig for kameraet", Point(w/2, h/2 - 0.035*h), w, h, "#FFFFFF", 0.07, "center", "#20800000"))
+        elif "too_close" in errors:
+            items.append(text("helper", "Du står for tæt på kameraet", Point(w/2, h/2 - 0.035*h), w, h, "#FFFFFF", 0.07, "center", "#20800000"))
+        elif "not_middle" in errors:
+            items.append(text("helper", "Du bør stille dig nærmere midten for kameraet", Point(w/2, h/2 - 0.035*h), w, h, "#FFFFFF", 0.07, "center", "#20800000"))
+        elif "hands_together" in errors or "hands_outside" in errors:
+            items.append(text("helper", "Dine hænder skal være inden for\nén skulder længde af hinanden", Point(w/2, h/2 - 0.035*h), w, h, "#FFFFFF", 0.07, "center", "#20800000"))
+        return items
+
+    # - Any -----------------------
     items.append(line("shoulders", p("left_shoulder"), p("right_shoulder"), w, h, "#B0310874"))
     items.append(dot("shoulder1", p("left_shoulder"), w, h, "#3b2fdd"))
     items.append(dot("shoulder2", p("right_shoulder"), w, h, "#3b2fdd"))
@@ -363,10 +384,30 @@ def construct(points: dict[str, Point], mode: str, w: int, h: int) -> list[dict]
         shoulder_to_shoulder.y, shoulder_to_shoulder.x
     )
 
-    items.append(text("angle", f"Vinkel af hammer: {ANGLE}", Point(w,0.03 * h), w, h, "#FFFFFF", bg_color="#a20000000", size = 0.02, align="left"))
-    items.append(text("shoulder_angle", f"Vinkel af skuldre: {SHOULDER_ANGLE}", Point(w,0), w, h, "#FFFFFF", bg_color="#a20000000", size = 0.02, align="left"))
+    items.append(text("angle", f"Vinkel af hammer: {ANGLE}", Point(w,0.03 * h), w, h, "#FFFFFF", bg_color="#20000000", size = 0.02, align="left"))
+    items.append(text("shoulder_angle", f"Vinkel af skuldre: {SHOULDER_ANGLE}", Point(w,0), w, h, "#FFFFFF", bg_color="#20000000", size = 0.02, align="left"))
     
     return items
+
+# --- Main -----------------------------------------------------------------
+def update(points: dict[str, Point], mode: str, para: dict[str, Any], w: int, h: int) -> str:
+    match mode:
+        case "setup":
+            items = construct(points, mode, w, h)
+            if (len(items) == 1):
+                items.append(text("helper", f" {(5 + para['timer'] - time.time()):.1f} ", Point(w/2, h/2 - 0.035*h), w, h, "#FFFFFF", 0.07, "center", "#2000FF00"))
+                if 5 + para['timer'] - time.time() <= 0.05:
+                    mode = "playing"
+            else:
+                para["timer"] = time.time()
+            send([command("clear"), command("batch", {"items": items})])
+        case "playing":
+            send([command("clear"), command("batch", {"items": [text("helper", "You are now playing the game", Point(w/2, h/2 - 0.035*h), w, h, "#FFFFFF", 0.07, "center", "#2000FF00")]})])
+        case "_":
+            raise ValueError(f"{mode} is not a valid mode")
+    
+    # send([command("clear"), command("batch", {"items": construct(points, mode, w, h) + display_errors(collect_errors(points, w, h), points, w, h)})])
+    return mode
 
 def main() -> None:
     # Optains Camera
@@ -392,6 +433,7 @@ def main() -> None:
     h, w, _ = frame.shape
 
     mode = "setup"
+    para: dict[str, Any] = {"timer": time.time()}
 
     # Main Loop
     while cap.isOpened():
@@ -403,11 +445,11 @@ def main() -> None:
         if (not points):
             continue
 
-        # Sends commands to overlay
-        send([command("clear"), command("batch", {"items": construct(points, mode, w, h) + display_errors(collect_errors(points, w, h), points, w, h)})])
+        # runs update
+        mode = update(points, mode, para, w, h)
 
-        if cv2.waitKey(1) == ord("q"):
-            break
+        # if cv2.waitKey(1) == ord("q"):
+        #     break
 
     cap.release()
     cv2.destroyAllWindows()

@@ -21,6 +21,7 @@ options = vision.PoseLandmarkerOptions(
     min_tracking_confidence=0.8,
 )
 
+# --- Color ----------------------------------------------------------------
 def interpolate_color(color1: str, color2: str, factor: float) -> str:
     """
     Interpolates between two hex colors.
@@ -122,6 +123,13 @@ class Point:
     def dot(self, rhs: Self) -> float:
         return self.x * rhs.x + self.y * rhs.y
 
+    def inside_bounds(self, x1, y1, x2, y2) -> bool:
+        return (self.x >= x1 or self.x <= x2 or self.y >= y1 or self.y <= y2)
+
+    def __str__(self):
+        if self.z == None:
+            return f"({self.x}, {self.y})"
+        return f"({self.x}, {self.y}, {self.z})"
 
 def average_hand(a: Point, b: Point, c: Point):
     x = (a.x + b.x + c.x) / 3
@@ -176,7 +184,7 @@ def line(id: str, p1: Point, p2: Point, srW: int, srH: int, color: str, width: f
         "ttl": TTL_MS,
     }
 
-def text(id: str, t: str, achor: Point, srW: int, srH: int, color: str, size: float = 0.01, align: str = "center", bgColor: str = "#a00000000", bold: bool = False) -> dict:
+def text(id: str, t: str, achor: Point, srW: int, srH: int, color: str, size: float = 0.01, align: str = "center", bg_color: str = "#a00000000", bold: bool = False) -> dict:
     x = achor.x / srW
     if MIRROR:
         x = 1 - x
@@ -189,7 +197,7 @@ def text(id: str, t: str, achor: Point, srW: int, srH: int, color: str, size: fl
         "color": color,
         "size": size,
         "align": align,
-        "bg": bgColor,
+        "bg": bg_color,
         "bold": bold,
         "ttl": TTL_MS,
     }
@@ -198,16 +206,16 @@ def command(cmd: str, input: dict = {}) -> dict:
     input["cmd"] = cmd
     return input
 
-def jsonCommand(cmd: dict | list[dict] = {}) -> str:
+def json_command(cmd: dict | list[dict] = {}) -> str:
     if isinstance(cmd, dict):
         return json.dumps(cmd, separators=(",", ":"))
     return "\n".join(json.dumps(ting, separators=(",", ":")) for ting in cmd)
 
 def send(commands: list[dict]) -> None:
     if commands:
-        _sock.sendto(jsonCommand(commands).encode() + b"\n", OVERLAY_ADDR)
+        _sock.sendto(json_command(commands).encode() + b"\n", OVERLAY_ADDR)
 
-# --- Camera -------------------------
+# --- Camera ---------------------------------------------------------------
 def validate_camera(index: int) -> bool:
     cap = cv2.VideoCapture(index)
     try:
@@ -230,8 +238,117 @@ def get_camera_index() -> int:
 
         print("Det kamera eksisterer ikke")
 
-# --- Main ----------------
+# --- Find Points ----------------------------------------------------------
+def findPoints(cap: cv2.VideoCapture, detector: Any) -> tuple[Point, Point, Point, Point] | None:
+    """Returns (leftHand, rightHand, leftShoulder, rightShoulder, *centerOfBody)"""
+    ret, frame = cap.read()
+    if not ret:
+        return
+    h, w, _ = frame.shape
+
+    rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+    mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb_frame)
+
+    timestamp_ms = int((cv2.getTickCount() / cv2.getTickFrequency()) * 1000)
+
+    detection_result = detector.detect_for_video(mp_image, timestamp_ms)
+
+    if detection_result.pose_landmarks:
+        for pose_landmarks in detection_result.pose_landmarks:
+            # if "DEBUG" in os.environ and os.environ.get("DEBUG") == "true":
+            #     for i, landmark in enumerate(pose_landmarks):
+            #         lm = Point(landmark.x * w, landmark.y * h)
+            #         items.append(dot(f"lm{i}", lm, w, h, "#0000ff", 0.004))
+
+            left = average_hand(
+                Point.from_landmark(pose_landmarks[15]).correct(w, h),
+                Point.from_landmark(pose_landmarks[17]).correct(w, h),
+                Point.from_landmark(pose_landmarks[19]).correct(w, h),
+            )
+            right = average_hand(
+                Point.from_landmark(pose_landmarks[16]).correct(w, h),
+                Point.from_landmark(pose_landmarks[18]).correct(w, h),
+                Point.from_landmark(pose_landmarks[20]).correct(w, h),
+            )
+
+            left_shoulder = Point.from_landmark(pose_landmarks[12]).correct(w, h)
+            right_shoulder = Point.from_landmark(pose_landmarks[11]).correct(w, h)
+
+            return (left, right, left_shoulder, right_shoulder)
+
+# --- Main -----------------------------------------------------------------
+def construct(left_hand: Point, right_hand: Point, left_shoulder: Point, right_shoulder: Point, w: int, h: int) -> list[dict]:
+    items: list[dict] = []
+
+    # Checks if hands are outside of bounds
+    if (not left_hand.inside_bounds(0,0,w,h) or not right_hand.inside_bounds(0,0,w,h)):
+        items.append(text("hands_outside", "Dine hænder skal være inden for billedet", Point(w/2,0), w, h, "#FFFFFF", bg_color="#a20000000", size = 0.04))
+        return items
+    
+    # Checks if shoulders are outside of bounds
+    if (not left_shoulder.inside_bounds(0,0,w,h) or not right_shoulder.inside_bounds(0,0,w,h)):
+        items.append(text("shoulders_outside", "Dine skuldre skal være inden for billedet", Point(w/2,0), w, h, "#FFFFFF", bg_color="#a20000000", size = 0.04))
+        return items
+    
+    shoulder_dist = left_shoulder.dist(right_shoulder)
+    hand_dist = left_hand.dist(right_hand)
+    
+    # Checks if hands are further apart than shoulders
+    if hand_dist > shoulder_dist:
+        items.append(text("hands_together", "Dine hænder må ikke være mere end 1 skuldrelængde fra hinanden", Point(w/2,0), w, h, "#FFFFFF", bg_color="#a20000000", size = 0.04))
+        items.append(dot("right_hand", right_hand, w, h, "#ff0000", r = 0.01))
+        items.append(dot("left_hand", left_hand, w, h, "#ff0000", r = 0.01))
+        return items
+    
+    items.append(line("shoulders", left_shoulder, right_shoulder, w, h, "#B0310874"))
+    items.append(dot("shoulder1", left_shoulder, w, h, "#3b2fdd"))
+    items.append(dot("shoulder2", right_shoulder, w, h, "#3b2fdd"))
+    
+    shoulder_mid = left_shoulder.midpoint(right_shoulder)
+    
+    # How much to move it down by
+    hmtmidb = shoulder_dist / 2
+    
+    perp = Point(
+        -(right_shoulder.y - left_shoulder.y),
+        right_shoulder.x - left_shoulder.x,
+    )
+    perp_unit = perp / perp.length()
+    
+    chest_mid = shoulder_mid + (perp_unit * hmtmidb)
+    items.append(dot("chest_mid", chest_mid, w, h, "#ffffff"))
+    
+    mid_hands = left_hand.midpoint(right_hand)
+    items.append(dot("mid_hands", mid_hands, w, h, interpolate_color("#00FF00", "#FF0000", hand_dist/shoulder_dist)))
+    
+    shoulder_to_shoulder = Point(
+        right_shoulder.x - left_shoulder.x,
+        right_shoulder.y - left_shoulder.y,
+    )
+    
+    shoulder_mid_to_mid_hands = Point(
+        shoulder_mid.x - mid_hands.x, shoulder_mid.y - mid_hands.y
+    )
+    
+    angle = math.acos(
+        shoulder_to_shoulder.dot(shoulder_mid_to_mid_hands)
+        / (
+            shoulder_to_shoulder.length()
+            * shoulder_mid_to_mid_hands.length()
+        )
+    )
+    
+    shoulder_angle = math.atan2(
+        shoulder_to_shoulder.y, shoulder_to_shoulder.x
+    )
+
+    items.append(text("angle", f"Vinkel af hammer: {angle}", Point(w,0.03 * h), w, h, "#FFFFFF", bg_color="#a20000000", size = 0.02, align="left"))
+    items.append(text("shoulder_angle", f"Vinkel af skuldre: {shoulder_angle}", Point(w,0), w, h, "#FFFFFF", bg_color="#a20000000", size = 0.02, align="left"))
+    
+    return items
+
 def main() -> None:
+    # Optains Camera
     if "CAMERA" in os.environ:
         try:
             camera_env = os.environ.get("CAMERA")
@@ -246,200 +363,31 @@ def main() -> None:
     else:
         cam_index = get_camera_index()
 
+    # Optains frame
     detector = vision.PoseLandmarker.create_from_options(options)
-
     cap = cv2.VideoCapture(cam_index)
+    ret, frame = cap.read()
+    if not ret:
+        return
+    h, w, _ = frame.shape
 
+    # Main Loop
     while cap.isOpened():
-        ret, frame = cap.read()
-        if not ret:
-            break
+        # Optains Points from frame
+        points = findPoints(cap, detector)
+        if (not points):
+            continue
+        left_hand, right_hand, left_shoulder, right_shoulder = points
+        # print(left_hand, right_hand, left_shoulder, right_shoulder)
 
-        rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb_frame)
+        # Sends commands to overlay
+        send([command("clear"), command("batch", {"items": construct(left_hand, right_hand, left_shoulder, right_shoulder, w, h)})])
 
-        timestamp_ms = int((cv2.getTickCount() / cv2.getTickFrequency()) * 1000)
-
-        detection_result = detector.detect_for_video(mp_image, timestamp_ms)
-
-        h, w, _ = frame.shape
-        items: list[dict] = []
-        commands: list[dict] = [command("clear")]
-
-        if detection_result.pose_landmarks:
-            for pose_landmarks in detection_result.pose_landmarks:
-                if "DEBUG" in os.environ and os.environ.get("DEBUG") == "true":
-                    for i, landmark in enumerate(pose_landmarks):
-                        lm = Point(landmark.x * w, landmark.y * h)
-                        items.append(dot(f"lm{i}", lm, w, h, "#0000ff", 0.004))
-
-                left = average_hand(
-                    Point.from_landmark(pose_landmarks[15]).correct(w, h),
-                    Point.from_landmark(pose_landmarks[17]).correct(w, h),
-                    Point.from_landmark(pose_landmarks[19]).correct(w, h),
-                )
-                right = average_hand(
-                    Point.from_landmark(pose_landmarks[16]).correct(w, h),
-                    Point.from_landmark(pose_landmarks[18]).correct(w, h),
-                    Point.from_landmark(pose_landmarks[20]).correct(w, h),
-                )
-
-                if (
-                    left.x < 0
-                    or left.x > w
-                    or left.y < 0
-                    or left.y > h
-                    or right.x < 0
-                    or right.x > w
-                    or right.y < 0
-                    or right.y > h
-                ):
-                    # frame = cv2.flip(frame, 1)
-                    # cv2.putText(
-                    #     frame,
-                    #     "Dine hænder skal være inden for billedet",
-                    #     (100, 100),
-                    #     cv2.FONT_HERSHEY_SIMPLEX,
-                    #     1,
-                    #     (255, 0, 0),
-                    #     2,
-                    # )
-                    # frame = cv2.flip(frame, 1)
-                    items.append(text("handsOutside", "Dine hænder skal være inden for billedet", Point(w/2,0), w, h, "#FFFFFF", bgColor="#a20000000", size = 0.04))
-                    break
-
-                left_shoulder = Point.from_landmark(pose_landmarks[12]).correct(w, h)
-                right_shoulder = Point.from_landmark(pose_landmarks[11]).correct(w, h)
-
-                if (
-                    left_shoulder.x < 0
-                    or left_shoulder.x > w
-                    or left_shoulder.y < 0
-                    or left_shoulder.y > h
-                    or right_shoulder.x < 0
-                    or right_shoulder.x > w
-                    or right_shoulder.y < 0
-                    or right_shoulder.y > h
-                ):
-                    # frame = cv2.flip(frame, 1)
-                    # cv2.putText(
-                    #     frame,
-                    #     "Dine skuldre skal være inden for billedet",
-                    #     (100, 100),
-                    #     cv2.FONT_HERSHEY_SIMPLEX,
-                    #     1,
-                    #     (255, 0, 0),
-                    #     2,
-                    # )
-                    # frame = cv2.flip(frame, 1)
-                    items.append(text("shouldersOutside", "Dine skuldre skal være inden for billedet", Point(w/2,0), w, h, "#FFFFFF", bgColor="#a20000000", size = 0.04))
-                    break
-
-                shoulder_dist = left_shoulder.dist(right_shoulder)
-                hand_dist = left.dist(right)
-
-                if hand_dist > shoulder_dist:
-                    # frame = cv2.flip(frame, 1)
-                    # cv2.putText(
-                    #     frame,
-                    #     "Dine hænder må ikke være mere end 1 skuldrelængde fra hinanden",
-                    #     (100, 100),
-                    #     cv2.FONT_HERSHEY_SIMPLEX,
-                    #     1,
-                    #     (255, 0, 0),
-                    #     2,
-                    # )
-                    # frame = cv2.flip(frame, 1)
-                    items.append(text("handsTogether", "Dine hænder må ikke være mere end 1 skuldrelængde fra hinanden", Point(w/2,0), w, h, "#FFFFFF", bgColor="#a20000000", size = 0.04))
-                    items.append(dot("right_hand", right, w, h, "#ff0000", r = 0.01))
-                    items.append(dot("left_hand", left, w, h, "#ff0000", r = 0.01))
-                    break
-
-                items.append(line("shoulders", left_shoulder, right_shoulder, w, h, "#B0310874"))
-                items.append(dot("shoulder1", left_shoulder, w, h, "#3b2fdd"))
-                items.append(dot("shoulder2", right_shoulder, w, h, "#3b2fdd"))
-                
-                shoulder_mid = left_shoulder.midpoint(right_shoulder)
-
-                # How much to move it down by
-                hmtmidb = shoulder_dist / 2
-
-                perp = Point(
-                    -(right_shoulder.y - left_shoulder.y),
-                    right_shoulder.x - left_shoulder.x,
-                )
-                perp_unit = perp / perp.length()
-
-                chest_mid = shoulder_mid + (perp_unit * hmtmidb)
-                items.append(dot("chest_mid", chest_mid, w, h, "#ffffff"))
-
-                # print(
-                #     json.dumps({"left": {"x": left.x, "y": left.y}}),
-                #     flush=True,
-                # )
-                # print(
-                #     json.dumps({"right": {"x": right.x, "y": right.y}}),
-                #     flush=True,
-                # )
-
-                mid_hands = left.midpoint(right)
-                items.append(dot("mid_hands", mid_hands, w, h, interpolate_color("#00FF00", "#FF0000", hand_dist/shoulder_dist)))
-
-                shoulder_to_shoulder = Point(
-                    right_shoulder.x - left_shoulder.x,
-                    right_shoulder.y - left_shoulder.y,
-                )
-
-                shoulder_mid_to_mid_hands = Point(
-                    shoulder_mid.x - mid_hands.x, shoulder_mid.y - mid_hands.y
-                )
-
-                angle = math.acos(
-                    shoulder_to_shoulder.dot(shoulder_mid_to_mid_hands)
-                    / (
-                        shoulder_to_shoulder.length()
-                        * shoulder_mid_to_mid_hands.length()
-                    )
-                )
-
-                shoulder_angle = math.atan2(
-                    shoulder_to_shoulder.y, shoulder_to_shoulder.x
-                )
-
-                frame = cv2.flip(frame, 1)
-                cv2.putText(
-                    frame,
-                    f"{angle}",
-                    (100, 100),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    1,
-                    (255, 0, 0),
-                    2,
-                )
-
-                cv2.putText(
-                    frame,
-                    f"Shoulder angle: {shoulder_angle}",
-                    (100, 120),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    1,
-                    (255, 0, 0),
-                    2,
-                )
-                frame = cv2.flip(frame, 1)
-
-        commands.append(command("batch", {"items": items}))
-        send(commands)
-
-        flipped = cv2.flip(frame, 1)
-
-        # cv2.imshow("Capture", flipped)
         if cv2.waitKey(1) == ord("q"):
             break
 
     cap.release()
     cv2.destroyAllWindows()
-
 
 if __name__ == "__main__":
     main()

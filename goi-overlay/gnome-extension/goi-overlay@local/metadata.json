@@ -1,0 +1,7 @@
+{
+  "uuid": "goi-overlay@local",
+  "name": "GOI Overlay",
+  "description": "Click-through drawing overlay controlled via JSON over UDP 127.0.0.1:45454",
+  "shell-version": ["45", "46", "47", "48", "49", "50"],
+  "version": 1
+}

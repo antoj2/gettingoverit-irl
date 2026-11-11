@@ -46,11 +46,30 @@ void Overlay::handleMessage(const QJsonObject &m) {
         const QString id = m.value("id").toString();
         items_.erase(std::remove_if(items_.begin(), items_.end(),
                                     [&](const Item &i) { return i.id == id; }), items_.end());
-    } else if (cmd == "hide") visible_ = false;
+    } else if (cmd == "screen") emit screenRequested(m.value("index").toInt());
+    else if (cmd == "interactive") setInteractive(m.value("enabled").toBool(true));
+    else if (cmd == "hide") visible_ = false;
     else if (cmd == "show") visible_ = true;
     else if (cmd == "batch") { for (auto v : m.value("items").toArray()) upsert(v.toObject()); }
     else upsert(m); // "set"
     update();
+}
+
+void Overlay::setInteractive(bool on) {
+    if (on == interactive_) return;
+    interactive_ = on;
+    setWindowFlag(Qt::WindowTransparentForInput, !on); // hides the window; caller re-presents it
+    setAttribute(Qt::WA_TransparentForMouseEvents, !on);
+    setMouseTracking(on);
+    emit interactiveChanged();
+    update();
+}
+
+void Overlay::sendMouse(const char *type, QMouseEvent *e) {
+    const char *btn = e->button() == Qt::LeftButton ? "left" : e->button() == Qt::RightButton ? "right"
+                    : e->button() == Qt::MiddleButton ? "middle" : "none";
+    emit mouseEvent({{"event", "mouse"}, {"type", type}, {"button", btn},
+                     {"x", e->position().x() / width()}, {"y", e->position().y() / height()}});
 }
 
 static QColor col(const QJsonObject &o, const char *k, const QColor &def) {
@@ -64,7 +83,7 @@ void Overlay::paintEvent(QPaintEvent *) {
     p.setRenderHint(QPainter::Antialiasing);
     p.setRenderHint(QPainter::TextAntialiasing);
     p.setCompositionMode(QPainter::CompositionMode_Source);
-    p.fillRect(rect(), Qt::transparent);
+    p.fillRect(rect(), QColor(0, 0, 0, interactive_ ? 1 : 0));
     p.setCompositionMode(QPainter::CompositionMode_SourceOver);
     if (!visible_) return;
 

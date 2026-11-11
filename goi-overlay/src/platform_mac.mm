@@ -5,7 +5,7 @@
 namespace PlatformTweaks {
 void preApp() {}
 void beforeShow(QWidget *) {}
-void afterShow(QWidget *w) {
+void afterShow(QWidget *w, bool interactive) {
     // Accessory apps (no dock icon) are allowed onto other apps' fullscreen Spaces.
     [NSApp setActivationPolicy:NSApplicationActivationPolicyAccessory];
     NSView *v = reinterpret_cast<NSView *>(w->winId());
@@ -15,7 +15,7 @@ void afterShow(QWidget *w) {
                                NSWindowCollectionBehaviorFullScreenAuxiliary |
                                NSWindowCollectionBehaviorStationary |
                                NSWindowCollectionBehaviorIgnoresCycle];
-    [win setIgnoresMouseEvents:YES];
+    [win setIgnoresMouseEvents:interactive ? NO : YES];
     [win setHidesOnDeactivate:NO];
     [win setHasShadow:NO];
     [win setOpaque:NO];

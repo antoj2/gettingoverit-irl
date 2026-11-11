@@ -5,10 +5,11 @@
 namespace PlatformTweaks {
 void preApp() {}
 void beforeShow(QWidget *) {}
-void afterShow(QWidget *w) {
+void afterShow(QWidget *w, bool interactive) {
     HWND h = reinterpret_cast<HWND>(w->winId());
     LONG_PTR ex = GetWindowLongPtr(h, GWL_EXSTYLE);
-    ex |= WS_EX_TRANSPARENT | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW | WS_EX_TOPMOST;
+    ex |= WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW | WS_EX_TOPMOST;
+    if (interactive) ex &= ~WS_EX_TRANSPARENT; else ex |= WS_EX_TRANSPARENT;
     SetWindowLongPtr(h, GWL_EXSTYLE, ex);
     keepOnTop(w);
 }

@@ -35,6 +35,6 @@ void beforeShow(QWidget *w) {
     Q_UNUSED(w);
 #endif
 }
-void afterShow(QWidget *) {}
+void afterShow(QWidget *, bool) {}
 void keepOnTop(QWidget *) {}
 }

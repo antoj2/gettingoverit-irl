@@ -21,7 +21,53 @@ options = vision.PoseLandmarkerOptions(
     min_tracking_confidence=0.8,
 )
 
+def interpolate_color(color1: str, color2: str, factor: float) -> str:
+    """
+    Interpolates between two hex colors.
 
+    Supports:
+        #RRGGBB
+        #AARRGGBB
+
+    Args:
+        color1: Starting color.
+        color2: Ending color.
+        factor: Interpolation factor (0.0 = color1, 1.0 = color2).
+
+    Returns:
+        Interpolated hex color.
+    """
+    if not 0.0 <= factor <= 1.0:
+        raise ValueError("factor must be between 0.0 and 1.0")
+
+    def parse_color(color: str) -> tuple[int, ...]:
+        color = color.lstrip("#")
+
+        if len(color) == 6:
+            return (255, *(
+                int(color[i:i + 2], 16)
+                for i in range(0, 6, 2)
+            ))
+
+        if len(color) == 8:
+            return tuple(
+                int(color[i:i + 2], 16)
+                for i in range(0, 8, 2)
+            )
+
+        raise ValueError(f"Invalid color format: {color}")
+
+    c1 = parse_color(color1)
+    c2 = parse_color(color2)
+
+    result = tuple(
+        round(a + (b - a) * factor)
+        for a, b in zip(c1, c2)
+    )
+
+    return "#" + "".join(f"{channel:02X}" for channel in result)
+
+# --- Point ----------------------------------------------------------------
 class Point:
     x: float
     y: float
@@ -161,7 +207,7 @@ def send(commands: list[dict]) -> None:
     if commands:
         _sock.sendto(jsonCommand(commands).encode() + b"\n", OVERLAY_ADDR)
 
-
+# --- Camera -------------------------
 def validate_camera(index: int) -> bool:
     cap = cv2.VideoCapture(index)
     try:
@@ -184,7 +230,7 @@ def get_camera_index() -> int:
 
         print("Det kamera eksisterer ikke")
 
-
+# --- Main ----------------
 def main() -> None:
     if "CAMERA" in os.environ:
         try:
@@ -305,9 +351,11 @@ def main() -> None:
                     # )
                     # frame = cv2.flip(frame, 1)
                     items.append(text("handsTogether", "Dine hænder må ikke være mere end 1 skuldrelængde fra hinanden", Point(w/2,0), w, h, "#FFFFFF", bgColor="#a20000000", size = 0.04))
+                    items.append(dot("right_hand", right, w, h, "#ff0000", r = 0.01))
+                    items.append(dot("left_hand", left, w, h, "#ff0000", r = 0.01))
                     break
 
-                items.append(line("shoulders", left_shoulder, right_shoulder, w, h, "#310874"))
+                items.append(line("shoulders", left_shoulder, right_shoulder, w, h, "#B0310874"))
                 items.append(dot("shoulder1", left_shoulder, w, h, "#3b2fdd"))
                 items.append(dot("shoulder2", right_shoulder, w, h, "#3b2fdd"))
                 
@@ -335,7 +383,7 @@ def main() -> None:
                 # )
 
                 mid_hands = left.midpoint(right)
-                items.append(dot("mid_hands", mid_hands, w, h, "#00ff00"))
+                items.append(dot("mid_hands", mid_hands, w, h, interpolate_color("#00FF00", "#FF0000", hand_dist/shoulder_dist)))
 
                 shoulder_to_shoulder = Point(
                     right_shoulder.x - left_shoulder.x,
@@ -379,9 +427,6 @@ def main() -> None:
                     2,
                 )
                 frame = cv2.flip(frame, 1)
-
-                items.append(dot("right_hand", right, w, h, "#ff0000"))
-                items.append(dot("left_hand", left, w, h, "#ff0000"))
 
         commands.append(command("batch", {"items": items}))
         send(commands)

@@ -339,6 +339,10 @@ def construct(points: dict[str, Point], mode: str, w: int, h: int) -> list[dict]
         elif "hands_together" in errors or "hands_outside" in errors:
             items.append(text("helper", "Dine hænder skal være inden for\nén skulder længde af hinanden", Point(w/2, h/2 - 0.035*h), w, h, "#FFFFFF", 0.07, "center", "#20800000"))
         return items
+    # - Setup ---------------------
+    if mode == "playing":
+        items.append(text("top_text", "Playing", Point(w/2,0), w, h, "#FFFFFF", bg_color="#71000000", size = 0.04, bold = True))
+        return items
 
     # - Any -----------------------
     items.append(line("shoulders", p("left_shoulder"), p("right_shoulder"), w, h, "#B0310874"))
@@ -389,24 +393,50 @@ def construct(points: dict[str, Point], mode: str, w: int, h: int) -> list[dict]
     
     return items
 
+# --- Handling Game Interaction --------------------------------------------
+def pause():
+    """Placeholder"""
+    return
+
+def unpause():
+    """Placeholder"""
+    return
+
+def get_expected_handposition() -> Point:
+    """Placeholder - gets where the hands should be located relative to the center based on how the in-game player is positioned"""
+    return Point(0,0)
+
 # --- Main -----------------------------------------------------------------
 def update(points: dict[str, Point], mode: str, para: dict[str, Any], w: int, h: int) -> str:
+    errors = collect_errors(points, w, h)
     match mode:
         case "setup":
             items = construct(points, mode, w, h)
             if (len(items) == 1):
                 items.append(text("helper", f" {(5 + para['timer'] - time.time()):.1f} ", Point(w/2, h/2 - 0.035*h), w, h, "#FFFFFF", 0.07, "center", "#2000FF00"))
                 if 5 + para['timer'] - time.time() <= 0.05:
+                    para["last_valid"] = points
                     mode = "playing"
             else:
                 para["timer"] = time.time()
             send([command("clear"), command("batch", {"items": items})])
         case "playing":
-            send([command("clear"), command("batch", {"items": [text("helper", "You are now playing the game", Point(w/2, h/2 - 0.035*h), w, h, "#FFFFFF", 0.07, "center", "#2000FF00")]})])
+            if (len(errors) > 0):
+                mode = "fixing"
+                pause()
+            else:
+                send([command("clear"), command("batch", {"items": construct(points, mode, w, h)})])
+        case "fixing":
+            send([command("clear"), command("batch", {"items": construct(points, mode, w, h) + display_errors(errors, points, w, h)})])
+            if (len(errors) == 0):
+                unpause()
+                mode = "playing"
         case "_":
             raise ValueError(f"{mode} is not a valid mode")
     
-    # send([command("clear"), command("batch", {"items": construct(points, mode, w, h) + display_errors(collect_errors(points, w, h), points, w, h)})])
+    if (len(errors) == 0):
+        para["last_valid"] = points
+    
     return mode
 
 def main() -> None:
@@ -433,7 +463,11 @@ def main() -> None:
     h, w, _ = frame.shape
 
     mode = "setup"
-    para: dict[str, Any] = {"timer": time.time()}
+    para: dict[str, Any] = {
+        "timer": time.time(),
+        "last_valid": {},
+        "expected_handpos": get_expected_handposition(),
+        }
 
     # Main Loop
     while cap.isOpened():

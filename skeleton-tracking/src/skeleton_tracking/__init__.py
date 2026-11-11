@@ -1,5 +1,7 @@
 # pyright: basic
+import json
 import os
+import socket
 from typing import Any, Self
 import cv2
 import mediapipe as mp
@@ -85,6 +87,38 @@ def average_hand(a: Point, b: Point, c: Point):
     return Point(x, y, z)
 
 
+# --- Overlay output -------------------------------------------------------
+# Dots are sent as JSON over UDP to the overlay instead of being drawn on the frame.
+OVERLAY_ADDR = ("127.0.0.1", int(os.environ.get("OVERLAY_PORT", "45454")))
+MIRROR = True  # the camera view is mirrored for the player, like the old flipped frame
+DOT_TTL_MS = 250  # dots vanish by themselves if tracking stops sending updates
+_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+
+
+def dot(id: str, p: Point, w: int, h: int, color: str, r: float = 0.006) -> dict:
+    """A circle for the overlay. p is in camera pixels; the overlay wants 0..1 fractions
+    of the screen (x by width, y by height, r by height)."""
+    x = p.x / w
+    if MIRROR:
+        x = 1 - x
+    return {
+        "id": id,
+        "type": "circle",
+        "x": x,
+        "y": p.y / h,
+        "r": r,
+        "width": 0,  # no outline, fill only
+        "fill": color,
+        "ttl": DOT_TTL_MS,
+    }
+
+
+def send_dots(dots: list[dict]) -> None:
+    if dots:
+        msg = json.dumps({"cmd": "batch", "items": dots}, separators=(",", ":"))
+        _sock.sendto(msg.encode() + b"\n", OVERLAY_ADDR)
+
+
 def validate_camera(index: int) -> bool:
     cap = cv2.VideoCapture(index)
     try:
@@ -140,14 +174,14 @@ def main() -> None:
         detection_result = detector.detect_for_video(mp_image, timestamp_ms)
 
         h, w, _ = frame.shape
+        dots: list[dict] = []
 
         if detection_result.pose_landmarks:
             for pose_landmarks in detection_result.pose_landmarks:
                 if "DEBUG" in os.environ and os.environ.get("DEBUG") == "true":
-                    for landmark in pose_landmarks:
-                        cx, cy = int(landmark.x * w), int(landmark.y * h)
-
-                        cv2.circle(frame, (cx, cy), 5, (255, 0, 0), cv2.FILLED)
+                    for i, landmark in enumerate(pose_landmarks):
+                        lm = Point(landmark.x * w, landmark.y * h)
+                        dots.append(dot(f"lm{i}", lm, w, h, "#0000ff", 0.004))
 
                 left = average_hand(
                     Point.from_landmark(pose_landmarks[15]).correct(w, h),
@@ -237,13 +271,7 @@ def main() -> None:
                 perp_unit = perp / perp.length()
 
                 chest_mid = shoulder_mid + (perp_unit * thingy)
-                cv2.circle(
-                    frame,
-                    chest_mid.as_tuple_int(),
-                    5,
-                    (255, 255, 255),
-                    cv2.FILLED,
-                )
+                dots.append(dot("chest_mid", chest_mid, w, h, "#ffffff"))
 
                 # print(
                 #     json.dumps({"left": {"x": left.x, "y": left.y}}),
@@ -255,7 +283,7 @@ def main() -> None:
                 # )
 
                 mid_hands = left.midpoint(right)
-                cv2.circle(frame, mid_hands.as_tuple_int(), 5, (0, 255, 0), cv2.FILLED)
+                dots.append(dot("mid_hands", mid_hands, w, h, "#00ff00"))
 
                 shoulder_to_shoulder = Point(
                     right_shoulder.x - left_shoulder.x,
@@ -300,24 +328,14 @@ def main() -> None:
                 )
                 frame = cv2.flip(frame, 1)
 
-                cv2.circle(
-                    frame,
-                    right.as_tuple_int(),
-                    5,
-                    (0, 0, 255),
-                    cv2.FILLED,
-                )
-                cv2.circle(
-                    frame,
-                    left.as_tuple_int(),
-                    5,
-                    (0, 0, 255),
-                    cv2.FILLED,
-                )
+                dots.append(dot("right_hand", right, w, h, "#ff0000"))
+                dots.append(dot("left_hand", left, w, h, "#ff0000"))
+
+        send_dots(dots)
 
         flipped = cv2.flip(frame, 1)
 
-        cv2.imshow("Capture", flipped)
+        # cv2.imshow("Capture", flipped)
         if cv2.waitKey(1) == ord("q"):
             break
 

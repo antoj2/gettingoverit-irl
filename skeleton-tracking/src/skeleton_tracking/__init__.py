@@ -262,7 +262,8 @@ def main() -> None:
 
                 shoulder_mid = left_shoulder.midpoint(right_shoulder)
 
-                thingy = shoulder_dist / 10
+                # How much to move it down by
+                hmtmidb = shoulder_dist / 10
 
                 perp = Point(
                     -(right_shoulder.y - left_shoulder.y),
@@ -270,7 +271,7 @@ def main() -> None:
                 )
                 perp_unit = perp / perp.length()
 
-                chest_mid = shoulder_mid + (perp_unit * thingy)
+                chest_mid = shoulder_mid + (perp_unit * hmtmidb)
                 dots.append(dot("chest_mid", chest_mid, w, h, "#ffffff"))
 
                 # print(

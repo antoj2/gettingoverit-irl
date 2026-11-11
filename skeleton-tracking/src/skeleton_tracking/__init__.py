@@ -85,14 +85,15 @@ def average_hand(a: Point, b: Point, c: Point):
     return Point(x, y, z)
 
 
-def get_camera_index() -> int:
-    def validate_camera(index: int) -> bool:
-        cap = cv2.VideoCapture(index)
-        try:
-            return cap.isOpened()
-        finally:
-            cap.release()
+def validate_camera(index: int) -> bool:
+    cap = cv2.VideoCapture(index)
+    try:
+        return cap.isOpened()
+    finally:
+        cap.release()
 
+
+def get_camera_index() -> int:
     while True:
         print("Hvilket kamera index vil du gerne bruge?")
         try:
@@ -108,7 +109,19 @@ def get_camera_index() -> int:
 
 
 def main() -> None:
-    cam_index = get_camera_index()
+    if "CAMERA" in os.environ:
+        try:
+            camera_env = os.environ.get("CAMERA")
+            assert camera_env is not None
+            cam_index = int(camera_env)
+            if not validate_camera(cam_index):
+                print("Det er IKKE et rigtigt kamera!")
+                return
+        except ValueError:
+            print("CAMERA er ikke et rigtigt tal!")
+            return
+    else:
+        cam_index = get_camera_index()
 
     detector = vision.PoseLandmarker.create_from_options(options)
 

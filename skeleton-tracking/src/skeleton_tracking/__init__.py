@@ -37,8 +37,14 @@ class Point:
     def __add__(self, other: Self) -> Self:
         return type(self)(self.x + other.x, self.y + other.y)
 
+    def __sub__(self, other: Self) -> Self:
+        return type(self)(self.x - other.x, self.y - other.y)
+
     def __mul__(self, other: float) -> Self:
         return type(self)(self.x * other, self.y * other)
+
+    def __div__(self, other: float) -> Self:
+        return type(self)(self.x / other, self.y / other)
 
     @classmethod
     def from_landmark(cls, lm: Any) -> Self:
@@ -504,6 +510,13 @@ def display_errors(
 
 def construct(points: dict[str, Point], mode: str, para: Parameters, w: int, h: int) -> list[dict]:
     items: list[dict] = []
+    # if para.state and para.state.hammer_tip and para.state.rotation_point:
+    #     poi = para.state.rotation_point - para.state.hammer_tip
+    #     ang = math.atan2(poi.x, poi.y)
+    #     ext = para.state.hammer_extension
+    #     items.append(
+    #         dot("test", poi + Point(3.5, 3.5), 7, 7, "#FFFFFF")
+    #     )
 
     def p(s: str) -> Point:
         return points[s]
@@ -708,7 +721,11 @@ def construct(points: dict[str, Point], mode: str, para: Parameters, w: int, h: 
 # --- Handling Game Interaction --------------------------------------------
 rx = socket.socket(socket.AF_INET, socket.SOCK_DGRAM); rx.bind(("127.0.0.1", 9877)); rx.settimeout(5)
 tx = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-send_game = lambda m: tx.sendto(m.encode(), ("127.0.0.1", 9876))
+
+def send_game(msg: str):
+    tx.sendto(msg.encode(), ("127.0.0.1", 9876))
+    return
+
 def game_state(time_out: float = 500) -> State | None:
     """Return the NEWEST packet: block for one, then drain everything queued behind it.
     If nothing arrives, it returns None."""
@@ -729,6 +746,13 @@ def game_state(time_out: float = 500) -> State | None:
         print("[game window unfocused and runInBackground is off - it may stall]", flush=True)
     return State(last)
 
+def prevent_player_pause(state: State | None = None):
+    """Prevents the player from pausing or unpausing the game themselfs"""
+    if not state or state.block_pause == False:
+        send_game("set block_pause 1")
+    return
+
+
 def pause(state: State | None = None):
     """Pauses the game without the pause menu"""
     if not state or state.paused == False:
@@ -743,6 +767,39 @@ def unpause(state: State | None = None):
     return
 
 
+def pause_menu(state: State | None = None):
+    """Pauses the game with the pause menu"""
+    if not state or state.pause_menu == False:
+        send_game("pause_menu 1")
+    return
+
+
+def unpause_menu(state: State | None = None):
+    """Unpauses the game from the pause menu"""
+    if not state or state.pause_menu == True:
+        send_game("pause_menu 0")
+    return
+
+
+def place_hammer(ang: float, ext: float):
+    """Put the hammer at an angle (degrees, 0 = pointing right, counter-clockwise) and a distance from the hinge pivot (in world units, e.g. `H 90 3.0`)."""
+    send_game(f"H {ang} {ext}")
+    return
+
+
+def place_cursor(pos: Point):
+    """Put the in-game cursor at a world position."""
+    send_game(f"W {pos.x} {pos.y}")
+    return
+
+
+def release_player(state: State | None = None):
+    """Stop overriding. The game's own mouse input takes over again."""
+    if not state or state.overiding == True:
+        send_game("off")
+    return
+
+
 def get_expected_handposition():
     """Placeholder - gets where the hands should be located relative to the center based on how the in-game player is positioned"""
     pass
@@ -754,8 +811,7 @@ def update(
 ) -> str:
     errors = collect_errors(points, w, h)
     para.state = game_state()
-    if para.state and para.state.block_pause == False:
-        send_game("set block_pause 1")
+    prevent_player_pause(para.state)
     
     match mode:
         case "setup":
@@ -843,16 +899,10 @@ def main() -> None:
     h, w, _ = frame.shape
 
     mode = "setup"
-    para = Parameters({
-        "timer": time.time(),
-        "timer": time.time(),
-        })
+    para = Parameters()
 
     # Main Loop
     while cap.isOpened():
-        # print(game_state())
-        # {'t': 15.972497, 'sw': 1920, 'sh': 1080, 'ov': False, 'bp': False, 'pz': False, 'pm': False, 'ts': 1, 'fo': True, 'bg': True}
-        # {'t': 35.570244, 'sw': 1920, 'sh': 1080, 'ov': False, 'bp': False, 'pz': False, 'pm': False, 'ts': 1, 'mp': False, 'fo': True, 'bg': True, 'fx': 11.875242, 'fy': 21.0933, 'mx': 681.62897, 'my': 356.40222, 'mt': 3, 'rx': 11.875244, 'ry': 21.093298, 'vx': 2.861023e-06, 'vy': -1.9073486e-06, 'wx': 11.875241, 'wy': 21.0933, 'tx': 11.875293, 'ty': 21.09324, 'cx': 13.669054, 'cy': 21.342697, 'ha': -165374.8, 'st': -0.4410016, 'bx': 13.669054, 'by': 21.342697, 'br': 0}
         # Optains Points from frame
         ret, frame = cap.read()
         if not ret:

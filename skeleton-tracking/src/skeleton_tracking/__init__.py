@@ -82,6 +82,21 @@ class Point:
         return f"({self.x}, {self.y})"
 
 
+class Points:
+    """The collection of points that make up relevant body features"""
+    left_hand: Point
+    right_hand: Point
+    left_shoulder: Point
+    right_shoulder: Point
+    body: Point
+
+    def __init__(self, points: dict[str, Point]) -> None:
+        self.left_hand = points["left_hand"]
+        self.right_hand = points["right_hand"]
+        self.left_shoulder = points["left_shoulder"]
+        self.right_shoulder = points["right_shoulder"]
+        self.body = points["body"]
+
 def average_point(points: list[Point]) -> Point:
     if not points:
         raise ValueError("Cannot calculate the average of an empty list")
@@ -165,7 +180,7 @@ class Parameters:
     """The current game state"""
     timer: float = time.time()
     """Used for measuring time"""
-    last_valid: dict[str, Point] | None = None
+    last_valid: Points | None = None
     """Last valid combination of body tracking markers"""
     expected_handpos: Point | None = None
     """The point where the game expects your hands to be located"""
@@ -335,7 +350,7 @@ def get_camera_index() -> int:
 def findPoints(
     frame: cv2.typing.MatLike,
     detector: Any = vision.PoseLandmarker.create_from_options(options),
-) -> dict[str, Point] | None:
+) -> Points | None:
     """Returns (leftHand, rightHand, leftShoulder, rightShoulder, centerOfBody)"""
     h, w, _ = frame.shape
 
@@ -375,42 +390,35 @@ def findPoints(
                 ]
             ).correct(w, h)
 
-            return {
+            return Points({
                 "left_hand": left_hand,
                 "right_hand": right_hand,
                 "left_shoulder": left_shoulder,
                 "right_shoulder": right_shoulder,
                 "body": body,
-            }
+            })
 
 
 # --- Overlay construction -------------------------------------------------
-def collect_errors(points: dict[str, Point], w: int, h: int, max_arm=2.2) -> list[str]:
+def collect_errors(points: Points, w: int, h: int, max_arm=2.2) -> list[str]:
     errors: list[str] = []
 
-    def p(s: str) -> Point:
-        return points[s]
-
-    if not p("left_hand").inside_bounds(0, 0, w, h) or not p(
-        "right_hand"
-    ).inside_bounds(0, 0, w, h):
+    if not points.left_hand.inside_bounds(0, 0, w, h) or not points.right_hand.inside_bounds(0, 0, w, h):
         errors.append("hands_outside")
-    if not p("left_shoulder").inside_bounds(0, 0, w, h) or not p(
-        "right_shoulder"
-    ).inside_bounds(0, 0, w, h):
+    if not points.left_shoulder.inside_bounds(0, 0, w, h) or not points.right_shoulder.inside_bounds(0, 0, w, h):
         errors.append("shoulders_outside")
-    shoulder_dist = p("left_shoulder").dist(p("right_shoulder"))
+    shoulder_dist = points.left_shoulder.dist(points.right_shoulder)
     MAX_ARM = shoulder_dist * max_arm
-    if not p("left_shoulder").inside_bounds(
+    if not points.left_shoulder.inside_bounds(
         MAX_ARM, MAX_ARM, w - MAX_ARM, h - MAX_ARM
-    ) or not p("right_shoulder").inside_bounds(
+    ) or not points.right_shoulder.inside_bounds(
         MAX_ARM, MAX_ARM, w - MAX_ARM, h - MAX_ARM
     ):
         if shoulder_dist + MAX_ARM * 2 > w:
             errors.append("too_close")
         else:
             errors.append("not_middle")
-    hand_dist = p("left_hand").dist(p("right_hand"))
+    hand_dist = points.left_hand.dist(points.right_hand)
     if hand_dist > shoulder_dist:
         errors.append("hands_together")
 
@@ -418,12 +426,9 @@ def collect_errors(points: dict[str, Point], w: int, h: int, max_arm=2.2) -> lis
 
 
 def display_errors(
-    errors: list[str], points: dict[str, Point], w: int, h: int
+    errors: list[str], points: Points, w: int, h: int
 ) -> list[dict]:
     items: list[dict] = []
-
-    def p(s: str) -> Point:
-        return points[s]
 
     offset = 0.01
     SIZE = 0.04
@@ -501,14 +506,14 @@ def display_errors(
                 "#20990000",
             )
         )
-        items.append(dot("right_hand", p("right_hand"), w, h, "#ff0000", r=0.01))
-        items.append(dot("left_hand", p("left_hand"), w, h, "#ff0000", r=0.01))
+        items.append(dot("right_hand", points.right_hand, w, h, "#ff0000", r=0.01))
+        items.append(dot("left_hand", points.left_hand, w, h, "#ff0000", r=0.01))
         offset += SIZE * 1.5
 
     return items
 
 
-def construct(points: dict[str, Point], mode: str, para: Parameters, w: int, h: int) -> list[dict]:
+def construct(points: Points, mode: str, para: Parameters, w: int, h: int) -> list[dict]:
     items: list[dict] = []
     # if para.state and para.state.hammer_tip and para.state.rotation_point:
     #     poi = para.state.rotation_point - para.state.hammer_tip
@@ -517,9 +522,6 @@ def construct(points: dict[str, Point], mode: str, para: Parameters, w: int, h: 
     #     items.append(
     #         dot("test", poi + Point(3.5, 3.5), 7, 7, "#FFFFFF")
     #     )
-
-    def p(s: str) -> Point:
-        return points[s]
 
     # - Setup ---------------------
     if mode == "setup":
@@ -641,27 +643,27 @@ def construct(points: dict[str, Point], mode: str, para: Parameters, w: int, h: 
 
     # - Any -----------------------
     items.append(
-        line("shoulders", p("left_shoulder"), p("right_shoulder"), w, h, "#B0310874")
+        line("shoulders", points.left_shoulder, points.right_shoulder, w, h, "#B0310874")
     )
-    items.append(dot("shoulder1", p("left_shoulder"), w, h, "#3b2fdd"))
-    items.append(dot("shoulder2", p("right_shoulder"), w, h, "#3b2fdd"))
+    items.append(dot("shoulder1", points.left_shoulder, w, h, "#3b2fdd"))
+    items.append(dot("shoulder2", points.right_shoulder, w, h, "#3b2fdd"))
 
-    SHOULDER_MID = p("left_shoulder").midpoint(p("right_shoulder"))
-    SHOULDER_DIST = p("left_shoulder").dist(p("right_shoulder"))
-    HAND_DIST = p("left_hand").dist(p("right_hand"))
+    SHOULDER_MID = points.left_shoulder.midpoint(points.right_shoulder)
+    SHOULDER_DIST = points.left_shoulder.dist(points.right_shoulder)
+    HAND_DIST = points.left_hand.dist(points.right_hand)
     # How much to move it down by
     HMTMIDB = SHOULDER_DIST / 2
 
     PERP = Point(
-        -(p("right_shoulder").y - p("left_shoulder").y),
-        p("right_shoulder").x - p("left_shoulder").x,
+        -(points.right_shoulder.y - points.left_shoulder.y),
+        points.right_shoulder.x - points.left_shoulder.x,
     )
     PERP_UNIT = PERP / PERP.length()
 
     CHEST_MID = SHOULDER_MID + (PERP_UNIT * HMTMIDB)
     items.append(dot("chest_mid", CHEST_MID, w, h, "#ffffff"))
 
-    mid_hands = p("left_hand").midpoint(p("right_hand"))
+    mid_hands = points.left_hand.midpoint(points.right_hand)
     items.append(
         dot(
             "mid_hands",
@@ -673,8 +675,8 @@ def construct(points: dict[str, Point], mode: str, para: Parameters, w: int, h: 
     )
 
     shoulder_to_shoulder = Point(
-        p("right_shoulder").x - p("left_shoulder").x,
-        p("right_shoulder").y - p("left_shoulder").y,
+        points.right_shoulder.x - points.left_shoulder.x,
+        points.right_shoulder.y - points.left_shoulder.y,
     )
 
     shoulder_mid_to_mid_hands = Point(
@@ -807,7 +809,7 @@ def get_expected_handposition():
 
 # --- Main -----------------------------------------------------------------
 def update(
-    points: dict[str, Point], mode: str, para: Parameters, w: int, h: int
+    points: Points, mode: str, para: Parameters, w: int, h: int
 ) -> str:
     errors = collect_errors(points, w, h)
     para.state = game_state()

@@ -395,15 +395,15 @@ def collect_errors(points: dict[str, Point], w: int, h: int, max_arm=2.2) -> lis
         errors.append("shoulders_outside")
     shoulder_dist = p("left_shoulder").dist(p("right_shoulder"))
     MAX_ARM = shoulder_dist * max_arm
-    # if not p("left_shoulder").inside_bounds(
-    #     MAX_ARM, MAX_ARM, w - MAX_ARM, h - MAX_ARM
-    # ) or not p("right_shoulder").inside_bounds(
-    #     MAX_ARM, MAX_ARM, w - MAX_ARM, h - MAX_ARM
-    # ):
-    #     if shoulder_dist + MAX_ARM * 2 > w:
-    #         errors.append("too_close")
-    #     else:
-    #         errors.append("not_middle")
+    if not p("left_shoulder").inside_bounds(
+        MAX_ARM, MAX_ARM, w - MAX_ARM, h - MAX_ARM
+    ) or not p("right_shoulder").inside_bounds(
+        MAX_ARM, MAX_ARM, w - MAX_ARM, h - MAX_ARM
+    ):
+        if shoulder_dist + MAX_ARM * 2 > w:
+            errors.append("too_close")
+        else:
+            errors.append("not_middle")
     hand_dist = p("left_hand").dist(p("right_hand"))
     if hand_dist > shoulder_dist:
         errors.append("hands_together")
@@ -759,7 +759,8 @@ def update(
     
     match mode:
         case "setup":
-            pause(para.state)
+            if para.state and para.state.rotation_point:
+                pause(para.state)
             items = construct(points, mode, para, w, h)
             if len(items) == 1:
                 items.append(

@@ -9,6 +9,7 @@ from mediapipe.tasks import python
 from mediapipe.tasks.python import vision
 import math
 import time
+import socket, json, time, math
 
 # Initialize PoseLandmarker
 base_options = python.BaseOptions(
@@ -128,7 +129,7 @@ def average_point(points: list[Point]) -> Point:
 # Commands are sent as JSON over UDP to the overlay instead of being drawn on the frame.
 OVERLAY_ADDR = ("127.0.0.1", int(os.environ.get("OVERLAY_PORT", "45454")))
 MIRROR = True  # the camera view is mirrored for the player, like the old flipped frame
-TTL_MS = 250  # drawn items vanish by themselves if tracking stops sending updates after this time
+TTL_MS = 1000  # drawn items vanish by themselves if tracking stops sending updates after this time
 _sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 
 
@@ -210,7 +211,7 @@ def json_command(cmd: dict | list[dict] = {}) -> str:
     return "\n".join(json.dumps(ting, separators=(",", ":")) for ting in cmd)
 
 
-def send(commands: list[dict]) -> None:
+def overlay(commands: list[dict]) -> None:
     if commands:
         _sock.sendto(json_command(commands).encode() + b"\n", OVERLAY_ADDR)
 
@@ -416,7 +417,7 @@ def display_errors(
     return items
 
 
-def construct(points: dict[str, Point], mode: str, w: int, h: int) -> list[dict]:
+def construct(points: dict[str, Point], mode: str, para: dict[str, Any], w: int, h: int) -> list[dict]:
     items: list[dict] = []
 
     def p(s: str) -> Point:
@@ -438,7 +439,35 @@ def construct(points: dict[str, Point], mode: str, w: int, h: int) -> list[dict]
             )
         )
         errors = collect_errors(points, w, h, max_arm=2.3)
-        if "shoulders_outside" in errors:
+        if not para["state"]:
+            items.append(
+                text(
+                    "helper",
+                    "Du er ikke inde spillet\nEller du har ikke installeret pluginet",
+                    Point(w / 2, h / 2 - 0.035 * h),
+                    w,
+                    h,
+                    "#FFFFFF",
+                    0.07,
+                    "center",
+                    "#20800000",
+                )
+            )
+        elif not para["state"].get("cx"):
+            items.append(
+                text(
+                    "helper",
+                    "Du er i menuen\nDu skal gå ind i et spil",
+                    Point(w / 2, h / 2 - 0.035 * h),
+                    w,
+                    h,
+                    "#FFFFFF",
+                    0.07,
+                    "center",
+                    "#20800000",
+                )
+            )
+        elif "shoulders_outside" in errors:
             items.append(
                 text(
                     "helper",
@@ -592,14 +621,41 @@ def construct(points: dict[str, Point], mode: str, w: int, h: int) -> list[dict]
 
 
 # --- Handling Game Interaction --------------------------------------------
-def pause():
-    """Placeholder"""
-    pass
+rx = socket.socket(socket.AF_INET, socket.SOCK_DGRAM); rx.bind(("127.0.0.1", 9877)); rx.settimeout(5)
+tx = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+send_game = lambda m: tx.sendto(m.encode(), ("127.0.0.1", 9876))
+def game_state(time_out: float = 500) -> dict | None:
+    """Return the NEWEST packet: block for one, then drain everything queued behind it.
+    If nothing arrives, it returns None."""
+    time_out /= 1000
+    while True:
+        rx.settimeout(time_out)
+        try:
+            last: dict = json.loads(rx.recv(65536)); break
+        except socket.timeout:
+            return None
+    rx.setblocking(False)
+    try:
+        while True: last: dict = json.loads(rx.recv(65536))
+    except BlockingIOError:
+        pass
+    rx.settimeout(5)
+    if last.get("fo") is False and not last.get("bg", False):
+        print("[game window unfocused and runInBackground is off - it may stall]", flush=True)
+    return last
+
+def pause(state: dict[str, str] | None = None):
+    """Pauses the game without the pause menu"""
+    if not state or state.get("pz") == False:
+        send_game("pause 1")
+    return
 
 
-def unpause():
-    """Placeholder"""
-    pass
+def unpause(state: dict[str, str] | None = None):
+    """Unpauses the game if there is no pause menu"""
+    if not state or state.get("pz") == True:
+        send_game("pause 0")
+    return
 
 
 def get_expected_handposition():
@@ -612,9 +668,14 @@ def update(
     points: dict[str, Point], mode: str, para: dict[str, Any], w: int, h: int
 ) -> str:
     errors = collect_errors(points, w, h)
+    para["state"] = game_state()
+    if para["state"] and (not para["state"].get("bp") or para["state"].get("bp") == False):
+        send_game("set block_pause 1")
+    
     match mode:
         case "setup":
-            items = construct(points, mode, w, h)
+            pause(para["state"])
+            items = construct(points, mode, para, w, h)
             if len(items) == 1:
                 items.append(
                     text(
@@ -634,33 +695,34 @@ def update(
                     mode = "playing"
             else:
                 para["timer"] = time.time()
-            send([command("clear"), command("batch", {"items": items})])
+            overlay([command("clear"), command("batch", {"items": items})])
         case "playing":
             if len(errors) > 0:
                 mode = "fixing"
-                pause()
+                pause(para["state"])
             else:
-                send(
+                unpause(para["state"])
+                overlay(
                     [
                         command("clear"),
-                        command("batch", {"items": construct(points, mode, w, h)}),
+                        command("batch", {"items": construct(points, mode, para, w, h)}),
                     ]
                 )
         case "fixing":
-            send(
+            overlay(
                 [
                     command("clear"),
                     command(
                         "batch",
                         {
-                            "items": construct(points, mode, w, h)
+                            "items": construct(points, mode, para, w, h)
                             + display_errors(errors, points, w, h)
                         },
                     ),
                 ]
             )
             if len(errors) == 0:
-                unpause()
+                unpause(para["state"])
                 mode = "playing"
         case "_":
             raise ValueError(f"{mode} is not a valid mode")
@@ -703,6 +765,9 @@ def main() -> None:
 
     # Main Loop
     while cap.isOpened():
+        # print(game_state())
+        # {'t': 15.972497, 'sw': 1920, 'sh': 1080, 'ov': False, 'bp': False, 'pz': False, 'pm': False, 'ts': 1, 'fo': True, 'bg': True}
+        # {'t': 35.570244, 'sw': 1920, 'sh': 1080, 'ov': False, 'bp': False, 'pz': False, 'pm': False, 'ts': 1, 'mp': False, 'fo': True, 'bg': True, 'fx': 11.875242, 'fy': 21.0933, 'mx': 681.62897, 'my': 356.40222, 'mt': 3, 'rx': 11.875244, 'ry': 21.093298, 'vx': 2.861023e-06, 'vy': -1.9073486e-06, 'wx': 11.875241, 'wy': 21.0933, 'tx': 11.875293, 'ty': 21.09324, 'cx': 13.669054, 'cy': 21.342697, 'ha': -165374.8, 'st': -0.4410016, 'bx': 13.669054, 'by': 21.342697, 'br': 0}
         # Optains Points from frame
         ret, frame = cap.read()
         if not ret:

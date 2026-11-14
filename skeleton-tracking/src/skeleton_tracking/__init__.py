@@ -23,6 +23,8 @@ Approx 2.6 shoulder lengths go into length of hammer, length of hammer approx 1.
 
 Multiply game_unit with SHOULDER_DIST_TO_GAME_UNIT to get shoulder_length
 """
+THRESHOLD_DIST = 0.08
+"""The number of shoulder lengths away the hands must be from the correct position to be accepted"""
 
 # Initialize PoseLandmarker
 base_options = python.BaseOptions(
@@ -121,7 +123,6 @@ class Points:
         self.right_hand = points["right_hand"]
         self.left_shoulder = points["left_shoulder"]
         self.right_shoulder = points["right_shoulder"]
-        self.body = points["body"]
 
         self.hands = self.left_hand.midpoint(self.right_hand)
         self.shoulder_mid = self.left_shoulder.midpoint(self.right_shoulder)
@@ -137,6 +138,15 @@ class Points:
         PERP_UNIT = PERP / PERP.length()
 
         self.rotation_center = self.shoulder_mid + (PERP_UNIT * HMTMIDB)
+
+
+    def normalized(self) -> Self:
+        return type(self)({
+            "left_hand": (self.left_hand - self.rotation_center) / self.shoulder_dist,
+            "right_hand": (self.right_hand - self.rotation_center) / self.shoulder_dist,
+            "left_shoulder": (self.left_shoulder - self.rotation_center) / self.shoulder_dist,
+            "right_shoulder": (self.right_shoulder - self.rotation_center) / self.shoulder_dist,
+        })
 
 # - Game State -----------------------------------
 class State:
@@ -226,6 +236,8 @@ class Parameters:
         self.last_valid = para.get("last_valid")
         self.expected_handpos = para.get("expected_handpos")
 
+para = Parameters()
+"""The globally shared parameters"""
 # --- Color ----------------------------------------------------------------
 def interpolate_color(color1: str, color2: str, factor: float) -> str:
     """Interpolates between two hex colors."""
@@ -293,6 +305,28 @@ def line(
         "y2": p2.y / srH,
         "width": width,
         "color": color,
+        "ttl": TTL_MS,
+    }
+
+
+def arrow(
+    id: str, start: Point, end: Point, srW: int, srH: int, color: str, width: float = 0.008
+) -> dict[str,Any]:
+    x1 = start.x / srW
+    x2 = end.x / srW
+    if MIRROR:
+        x1 = 1 - x1
+        x2 = 1 - x2
+    return {
+        "id": id,
+        "type": "line",
+        "x1": x1,
+        "y1": start.y / srH,
+        "x2": x2,
+        "y2": end.y / srH,
+        "width": width,
+        "color": color,
+        "arrow": True,
         "ttl": TTL_MS,
     }
 
@@ -402,26 +436,26 @@ def findPoints(
             left_shoulder = Point.from_landmark(pose_landmarks[12]).correct(w, h)
             right_shoulder = Point.from_landmark(pose_landmarks[11]).correct(w, h)
 
-            body = average_point(
-                [
-                    Point.from_landmark(pose_landmarks[11]),
-                    Point.from_landmark(pose_landmarks[12]),
-                    Point.from_landmark(pose_landmarks[23]),
-                    Point.from_landmark(pose_landmarks[24]),
-                ]
-            ).correct(w, h)
+            # body = average_point(
+            #     [
+            #         Point.from_landmark(pose_landmarks[11]),
+            #         Point.from_landmark(pose_landmarks[12]),
+            #         Point.from_landmark(pose_landmarks[23]),
+            #         Point.from_landmark(pose_landmarks[24]),
+            #     ]
+            # ).correct(w, h)
 
             return Points({
                 "left_hand": left_hand,
                 "right_hand": right_hand,
                 "left_shoulder": left_shoulder,
                 "right_shoulder": right_shoulder,
-                "body": body,
+                # "body": body,
             })
 
 
 # --- Overlay construction -------------------------------------------------
-def collect_errors(points: Points, w: int, h: int, max_arm=2.2) -> list[str]:
+def collect_errors(points: Points, last_valid: Points | None, w: int, h: int, max_arm=2.2) -> list[str]:
     errors: list[str] = []
 
     if not points.left_hand.inside_bounds(0, 0, w, h) or not points.right_hand.inside_bounds(0, 0, w, h):
@@ -442,6 +476,8 @@ def collect_errors(points: Points, w: int, h: int, max_arm=2.2) -> list[str]:
     hand_dist = points.left_hand.dist(points.right_hand)
     if hand_dist > shoulder_dist:
         errors.append("hands_together")
+    if last_valid and points.normalized().hands.dist(last_valid.normalized().hands) > THRESHOLD_DIST:
+        errors.append("hands_wrong")
 
     return errors
 
@@ -530,11 +566,27 @@ def display_errors(
         items.append(dot("right_hand", points.right_hand, w, h, "#ff0000", r=0.01))
         items.append(dot("left_hand", points.left_hand, w, h, "#ff0000", r=0.01))
         offset += SIZE * 1.5
+    elif "hands_wrong" in errors and para.last_valid:
+        items.append(
+            text(
+                "hands_wrong",
+                "Dine hænder skal matche der hvor de var, før du pausede",
+                Point(w / 2, offset * h),
+                w,
+                h,
+                "#FFFFFF",
+                SIZE,
+                "center",
+                "#20990000",
+            )
+        )
+        items.append(arrow("hand_dist", points.hands, para.last_valid.hands - para.last_valid.rotation_center + points.rotation_center, w, h, interpolate_color("#00FF00", "#FF0000", points.normalized().hands.dist(para.last_valid.normalized().hands) * 2)))
+        offset += SIZE * 1.5
 
     return items
 
 
-def construct(points: Points, mode: str, para: Parameters, w: int, h: int) -> list[dict[str,Any]]:
+def construct(points: Points, mode: str, w: int, h: int) -> list[dict[str,Any]]:
     items: list[dict[str,Any]] = []
 
     # - Setup ---------------------
@@ -552,7 +604,7 @@ def construct(points: Points, mode: str, para: Parameters, w: int, h: int) -> li
                 bold=True,
             )
         )
-        errors = collect_errors(points, w, h, max_arm=2.3)
+        errors = collect_errors(points, None, w, h, max_arm=0)
         if not para.state:
             items.append(
                 text(
@@ -638,12 +690,11 @@ def construct(points: Points, mode: str, para: Parameters, w: int, h: int) -> li
                 )
             )
         elif para.state and para.state.hammer_tip and para.state.rotation_point:
-            THRESHOLD = 0.08
             shoulder_dist = points.left_shoulder.dist(points.right_shoulder)
             exp_hands = get_expected_handposition(para.state.hammer_tip, para.state.rotation_point) * GAME_UNIT_TO_SHOULDER_DIST * shoulder_dist + points.rotation_center
             dist = points.hands.dist(exp_hands) / shoulder_dist
             color = interpolate_color("#00FF00", "#FF0000", dist)
-            if (dist > THRESHOLD):
+            if (dist > THRESHOLD_DIST):
                 items.append(
                     text(
                         "helper",
@@ -657,6 +708,10 @@ def construct(points: Points, mode: str, para: Parameters, w: int, h: int) -> li
                         "#20800000",
                     )
                 )
+            
+                arrow_offset = (exp_hands - points.hands)
+                arrow_offset = arrow_offset / arrow_offset.length() * (dist * shoulder_dist - 10)
+                items.append(arrow("hands_arrow", points.hands, points.hands + arrow_offset, w, h, color[:1] + '80' + color[3:], 0.006))
             
             # This could be replaced by a "circle" function instead of two dots, it would then have an outline paramter and a fill paramter.
             items.append(dot("expected_hands_outline", exp_hands, w, h, "#000000", 0.019))
@@ -839,9 +894,9 @@ def get_expected_handposition(rotation_point: Point, hammer_tip: Point) -> Point
 
 # --- Main -----------------------------------------------------------------
 def update(
-    points: Points, mode: str, para: Parameters, w: int, h: int
+    points: Points, mode: str, w: int, h: int
 ) -> str:
-    errors = collect_errors(points, w, h)
+    errors = collect_errors(points, para.last_valid, w, h)
     para.state = game_state()
     prevent_player_pause(para.state)
     
@@ -850,7 +905,7 @@ def update(
             # if para.state and para.state.rotation_point:
             #     pause(para.state)
             unpause(para.state)
-            items = construct(points, mode, para, w, h)
+            items = construct(points, mode, w, h)
             
             if not any(item.get("id") == "helper" for item in items):
                 items.append(
@@ -881,7 +936,7 @@ def update(
                 overlay(
                     [
                         command("clear"),
-                        command("batch", {"items": construct(points, mode, para, w, h)}),
+                        command("batch", {"items": construct(points, mode, w, h)}),
                     ]
                 )
         case "fixing":
@@ -891,7 +946,7 @@ def update(
                     command(
                         "batch",
                         {
-                            "items": construct(points, mode, para, w, h)
+                            "items": construct(points, mode, w, h)
                             + display_errors(errors, points, w, h)
                         },
                     ),
@@ -933,7 +988,6 @@ def main() -> None:
     h, w, _ = frame.shape
 
     mode = "setup"
-    para = Parameters()
 
     # Main Loop
     while cap.isOpened():
@@ -946,7 +1000,7 @@ def main() -> None:
             continue
 
         # runs update
-        mode = update(points, mode, para, w, h)
+        mode = update(points, mode, w, h)
 
         # if cv2.waitKey(1) == ord("q"):
         #     break

@@ -11,6 +11,19 @@ import math
 import time
 import socket, json, time, math
 
+SHOULDER_DIST_TO_GAME_UNIT = 1.96/2.6
+"""
+Approx 2.6 shoulder lengths go into length of hammer, length of hammer approx 1.96 game units
+
+Multiply shoulder_length with SHOULDER_DIST_TO_GAME_UNIT to get game_unit
+"""
+GAME_UNIT_TO_SHOULDER_DIST = 2.6/1.96
+"""
+Approx 2.6 shoulder lengths go into length of hammer, length of hammer approx 1.96 game units
+
+Multiply game_unit with SHOULDER_DIST_TO_GAME_UNIT to get shoulder_length
+"""
+
 # Initialize PoseLandmarker
 base_options = python.BaseOptions(
     model_asset_path="pose_landmarker_full.task",
@@ -22,7 +35,7 @@ options = vision.PoseLandmarkerOptions(
     min_tracking_confidence=0.8,
 )
 # --- Classes---------------------------------------------------------------
-# - Point ----------------------------------------
+# - Points ---------------------------------------
 class Point:
     x: float
     y: float
@@ -82,6 +95,13 @@ class Point:
         return f"({self.x}, {self.y})"
 
 
+def average_point(points: list[Point]) -> Point:
+    if not points:
+        raise ValueError("Cannot calculate the average of an empty list")
+    n = len(points)
+    return Point(x=sum(p.x for p in points) / n, y=sum(p.y for p in points) / n)
+
+
 class Points:
     """The collection of points that make up relevant body features"""
     left_hand: Point
@@ -89,6 +109,12 @@ class Points:
     left_shoulder: Point
     right_shoulder: Point
     body: Point
+    
+    hands: Point
+    rotation_center: Point
+    shoulder_mid: Point
+    hand_dist: float
+    shoulder_dist: float
 
     def __init__(self, points: dict[str, Point]) -> None:
         self.left_hand = points["left_hand"]
@@ -97,11 +123,20 @@ class Points:
         self.right_shoulder = points["right_shoulder"]
         self.body = points["body"]
 
-def average_point(points: list[Point]) -> Point:
-    if not points:
-        raise ValueError("Cannot calculate the average of an empty list")
-    n = len(points)
-    return Point(x=sum(p.x for p in points) / n, y=sum(p.y for p in points) / n)
+        self.hands = self.left_hand.midpoint(self.right_hand)
+        self.shoulder_mid = self.left_shoulder.midpoint(self.right_shoulder)
+        self.shoulder_dist = self.left_shoulder.dist(self.right_shoulder)
+        self.hand_dist = self.left_hand.dist(self.right_hand)
+        # How much to move it down by
+        HMTMIDB = self.shoulder_dist * 0.4
+
+        PERP = Point(
+            -(self.right_shoulder.y - self.left_shoulder.y),
+            self.right_shoulder.x - self.left_shoulder.x,
+        )
+        PERP_UNIT = PERP / PERP.length()
+
+        self.rotation_center = self.shoulder_mid + (PERP_UNIT * HMTMIDB)
 
 # - Game State -----------------------------------
 class State:
@@ -193,21 +228,7 @@ class Parameters:
 
 # --- Color ----------------------------------------------------------------
 def interpolate_color(color1: str, color2: str, factor: float) -> str:
-    """
-    Interpolates between two hex colors.
-
-    Supports:
-        #RRGGBB
-        #AARRGGBB
-
-    Args:
-        color1: Starting color.
-        color2: Ending color.
-        factor: Interpolation factor (0.0 = color1, 1.0 = color2).
-
-    Returns:
-        Interpolated hex color.
-    """
+    """Interpolates between two hex colors."""
     if factor < 0:
         return color1
     if factor > 1:
@@ -239,7 +260,7 @@ TTL_MS = 1000  # drawn items vanish by themselves if tracking stops sending upda
 _sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 
 
-def dot(id: str, p: Point, srW: int, srH: int, color: str, r: float = 0.006) -> dict:
+def dot(id: str, p: Point, srW: int, srH: int, color: str, r: float = 0.006) -> dict[str,Any]:
     x = p.x / srW
     if MIRROR:
         x = 1 - x
@@ -257,7 +278,7 @@ def dot(id: str, p: Point, srW: int, srH: int, color: str, r: float = 0.006) -> 
 
 def line(
     id: str, p1: Point, p2: Point, srW: int, srH: int, color: str, width: float = 0.008
-) -> dict:
+) -> dict[str,Any]:
     x1 = p1.x / srW
     x2 = p2.x / srW
     if MIRROR:
@@ -287,7 +308,7 @@ def text(
     align: str = "center",
     bg_color: str = "#00000000",
     bold: bool = False,
-) -> dict:
+) -> dict[str,Any]:
     x = achor.x / srW
     if MIRROR:
         x = 1 - x
@@ -306,18 +327,18 @@ def text(
     }
 
 
-def command(cmd: str, input: dict = {}) -> dict:
+def command(cmd: str, input: dict = {}) -> dict[str,Any]:
     input["cmd"] = cmd
     return input
 
 
-def json_command(cmd: dict | list[dict] = {}) -> str:
+def json_command(cmd: dict[str,Any] | list[dict[str,Any]] = {}) -> str:
     if isinstance(cmd, dict):
         return json.dumps(cmd, separators=(",", ":"))
     return "\n".join(json.dumps(ting, separators=(",", ":")) for ting in cmd)
 
 
-def overlay(commands: list[dict]) -> None:
+def overlay(commands: list[dict[str,Any]]) -> None:
     if commands:
         _sock.sendto(json_command(commands).encode() + b"\n", OVERLAY_ADDR)
 
@@ -427,8 +448,8 @@ def collect_errors(points: Points, w: int, h: int, max_arm=2.2) -> list[str]:
 
 def display_errors(
     errors: list[str], points: Points, w: int, h: int
-) -> list[dict]:
-    items: list[dict] = []
+) -> list[dict[str,Any]]:
+    items: list[dict[str,Any]] = []
 
     offset = 0.01
     SIZE = 0.04
@@ -513,15 +534,8 @@ def display_errors(
     return items
 
 
-def construct(points: Points, mode: str, para: Parameters, w: int, h: int) -> list[dict]:
-    items: list[dict] = []
-    # if para.state and para.state.hammer_tip and para.state.rotation_point:
-    #     poi = para.state.rotation_point - para.state.hammer_tip
-    #     ang = math.atan2(poi.x, poi.y)
-    #     ext = para.state.hammer_extension
-    #     items.append(
-    #         dot("test", poi + Point(3.5, 3.5), 7, 7, "#FFFFFF")
-    #     )
+def construct(points: Points, mode: str, para: Parameters, w: int, h: int) -> list[dict[str,Any]]:
+    items: list[dict[str,Any]] = []
 
     # - Setup ---------------------
     if mode == "setup":
@@ -623,6 +637,31 @@ def construct(points: Points, mode: str, para: Parameters, w: int, h: int) -> li
                     "#20800000",
                 )
             )
+        elif para.state and para.state.hammer_tip and para.state.rotation_point:
+            THRESHOLD = 0.08
+            shoulder_dist = points.left_shoulder.dist(points.right_shoulder)
+            exp_hands = get_expected_handposition(para.state.hammer_tip, para.state.rotation_point) * GAME_UNIT_TO_SHOULDER_DIST * shoulder_dist + points.rotation_center
+            dist = points.hands.dist(exp_hands) / shoulder_dist
+            color = interpolate_color("#00FF00", "#FF0000", dist)
+            if (dist > THRESHOLD):
+                items.append(
+                    text(
+                        "helper",
+                        "Dine hænder skal være tæt på\nden aktuelle position\ni spillet",
+                        Point(w / 2, h / 2 - 0.035 * h),
+                        w,
+                        h,
+                        "#FFFFFF",
+                        0.07,
+                        "center",
+                        "#20800000",
+                    )
+                )
+            
+            # This could be replaced by a "circle" function instead of two dots, it would then have an outline paramter and a fill paramter.
+            items.append(dot("expected_hands_outline", exp_hands, w, h, "#000000", 0.019))
+            items.append(dot("expected_hands", exp_hands, w, h, color, 0.015))
+            items.append(dot("hands", points.hands, w, h, color))
         return items
     # - Setup ---------------------
     if mode == "playing":
@@ -648,29 +687,15 @@ def construct(points: Points, mode: str, para: Parameters, w: int, h: int) -> li
     items.append(dot("shoulder1", points.left_shoulder, w, h, "#3b2fdd"))
     items.append(dot("shoulder2", points.right_shoulder, w, h, "#3b2fdd"))
 
-    SHOULDER_MID = points.left_shoulder.midpoint(points.right_shoulder)
-    SHOULDER_DIST = points.left_shoulder.dist(points.right_shoulder)
-    HAND_DIST = points.left_hand.dist(points.right_hand)
-    # How much to move it down by
-    HMTMIDB = SHOULDER_DIST / 2
+    items.append(dot("rot_cen", points.rotation_center, w, h, "#ffffff"))
 
-    PERP = Point(
-        -(points.right_shoulder.y - points.left_shoulder.y),
-        points.right_shoulder.x - points.left_shoulder.x,
-    )
-    PERP_UNIT = PERP / PERP.length()
-
-    CHEST_MID = SHOULDER_MID + (PERP_UNIT * HMTMIDB)
-    items.append(dot("chest_mid", CHEST_MID, w, h, "#ffffff"))
-
-    mid_hands = points.left_hand.midpoint(points.right_hand)
     items.append(
         dot(
             "mid_hands",
-            mid_hands,
+            points.hands,
             w,
             h,
-            interpolate_color("#00FF00", "#FF0000", HAND_DIST / SHOULDER_DIST),
+            interpolate_color("#00FF00", "#FF0000", points.hand_dist / points.shoulder_dist),
         )
     )
 
@@ -680,7 +705,7 @@ def construct(points: Points, mode: str, para: Parameters, w: int, h: int) -> li
     )
 
     shoulder_mid_to_mid_hands = Point(
-        SHOULDER_MID.x - mid_hands.x, SHOULDER_MID.y - mid_hands.y
+        points.shoulder_mid.x - points.hands.x, points.shoulder_mid.y - points.hands.y
     )
 
     ANGLE = math.acos(
@@ -799,12 +824,17 @@ def release_player(state: State | None = None):
     """Stop overriding. The game's own mouse input takes over again."""
     if not state or state.overiding == True:
         send_game("off")
+    if not state or state.block_pause == True:
+        send_game("set block_pause 0")
     return
 
 
-def get_expected_handposition():
-    """Placeholder - gets where the hands should be located relative to the center based on how the in-game player is positioned"""
-    pass
+def get_expected_handposition(rotation_point: Point, hammer_tip: Point) -> Point:
+    """Gets where the hands should be located relative to the center based on how the in-game player is positioned"""
+    hammer = hammer_tip - rotation_point
+    ang = math.atan2(hammer.x, hammer.y)
+    # hammer length: 1.96
+    return hammer - (Point(math.sin(ang), math.cos(ang)) * 1.96)
 
 
 # --- Main -----------------------------------------------------------------
@@ -817,10 +847,12 @@ def update(
     
     match mode:
         case "setup":
-            if para.state and para.state.rotation_point:
-                pause(para.state)
+            # if para.state and para.state.rotation_point:
+            #     pause(para.state)
+            unpause(para.state)
             items = construct(points, mode, para, w, h)
-            if len(items) == 1:
+            
+            if not any(item.get("id") == "helper" for item in items):
                 items.append(
                     text(
                         "helper",

@@ -107,16 +107,28 @@ def average_point(points: list[Point]) -> Point:
 class Points:
     """The collection of points that make up relevant body features"""
     left_hand: Point
+    """Position of left hand in screen pixels"""
     right_hand: Point
+    """Position of right hand in screen pixels"""
     left_shoulder: Point
+    """Position of left shoulder in screen pixels"""
     right_shoulder: Point
-    body: Point
+    """Position of right shoulder in screen pixels"""
+    # body: Point
+    # """Position of center of the body on screen"""
     
     hands: Point
+    """The average position of hands in screen pixels"""
     rotation_center: Point
+    """The center of rotation in screen pixels"""
     shoulder_mid: Point
+    """The center of rotation in screen pixels"""
     hand_dist: float
+    """The distance between the two hands in screen pixels"""
     shoulder_dist: float
+    """The distance between the two shoulders in screen pixels"""
+    hands_angle: float
+    """The angle of the hammer based on position of hands, center of rotation and rotation of shoulders relative to the camera rotation"""
 
     def __init__(self, points: dict[str, Point]) -> None:
         self.left_hand = points["left_hand"]
@@ -128,6 +140,7 @@ class Points:
         self.shoulder_mid = self.left_shoulder.midpoint(self.right_shoulder)
         self.shoulder_dist = self.left_shoulder.dist(self.right_shoulder)
         self.hand_dist = self.left_hand.dist(self.right_hand)
+        
         # How much to move it down by
         HMTMIDB = self.shoulder_dist * 0.4
 
@@ -138,6 +151,21 @@ class Points:
         PERP_UNIT = PERP / PERP.length()
 
         self.rotation_center = self.shoulder_mid + (PERP_UNIT * HMTMIDB)
+
+        HAND_VECTOR = self.hands - self.rotation_center
+        
+        SHOULDER_ANGLE = math.atan2(
+            self.right_shoulder.y - self.left_shoulder.y,
+            self.right_shoulder.x - self.left_shoulder.x,
+        )
+        
+        HAND_ANGLE = math.atan2(HAND_VECTOR.y, HAND_VECTOR.x)
+        
+        self.hands_angle = HAND_ANGLE - (SHOULDER_ANGLE + math.pi / 2)
+        
+        self.hands_angle = (
+            self.hands_angle + math.pi
+        ) % (2 * math.pi) - math.pi
 
 
     def normalized(self) -> Self:
@@ -751,49 +779,6 @@ def construct(points: Points, mode: str, w: int, h: int) -> list[dict[str,Any]]:
             w,
             h,
             interpolate_color("#00FF00", "#FF0000", points.hand_dist / points.shoulder_dist),
-        )
-    )
-
-    shoulder_to_shoulder = Point(
-        points.right_shoulder.x - points.left_shoulder.x,
-        points.right_shoulder.y - points.left_shoulder.y,
-    )
-
-    shoulder_mid_to_mid_hands = Point(
-        points.shoulder_mid.x - points.hands.x, points.shoulder_mid.y - points.hands.y
-    )
-
-    ANGLE = math.acos(
-        shoulder_to_shoulder.dot(shoulder_mid_to_mid_hands)
-        / (shoulder_to_shoulder.length() * shoulder_mid_to_mid_hands.length())
-    )
-
-    SHOULDER_ANGLE = math.atan2(shoulder_to_shoulder.y, shoulder_to_shoulder.x)
-
-    items.append(
-        text(
-            "angle",
-            f"Vinkel af hammer: {ANGLE}",
-            Point(w, 0.03 * h),
-            w,
-            h,
-            "#FFFFFF",
-            bg_color="#20000000",
-            size=0.02,
-            align="left",
-        )
-    )
-    items.append(
-        text(
-            "shoulder_angle",
-            f"Vinkel af skuldre: {SHOULDER_ANGLE}",
-            Point(w, 0),
-            w,
-            h,
-            "#FFFFFF",
-            bg_color="#20000000",
-            size=0.02,
-            align="left",
         )
     )
 

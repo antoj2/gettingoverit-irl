@@ -632,7 +632,7 @@ def construct(points: Points, mode: str, w: int, h: int) -> list[dict[str,Any]]:
                 bold=True,
             )
         )
-        errors = collect_errors(points, None, w, h, max_arm=0)
+        errors = collect_errors(points, None, w, h, max_arm=2.3)
         if not para.state:
             items.append(
                 text(
@@ -887,9 +887,9 @@ def update(
     
     match mode:
         case "setup":
-            # if para.state and para.state.rotation_point:
-            #     pause(para.state)
-            unpause(para.state)
+            if para.state and para.state.rotation_point:
+                pause(para.state)
+            # unpause(para.state)
             items = construct(points, mode, w, h)
             
             if not any(item.get("id") == "helper" for item in items):

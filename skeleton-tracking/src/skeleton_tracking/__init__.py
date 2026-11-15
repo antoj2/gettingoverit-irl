@@ -849,7 +849,7 @@ def unpause_menu(state: State | None = None):
 
 
 def place_hammer(ang: float, ext: float):
-    """Put the hammer at an angle (degrees, 0 = pointing right, counter-clockwise) and a distance from the hinge pivot (in world units, e.g. `H 90 3.0`)."""
+    """Put the hammer at an angle (degrees, 0 = pointing right, counter-clockwise) and a distance from the hinge pivot (in world units and degrees)."""
     send_game(f"H {ang} {ext}")
     return
 
@@ -866,6 +866,10 @@ def release_player(state: State | None = None):
         send_game("off")
     if not state or state.block_pause == True:
         send_game("set block_pause 0")
+    if not state or state.paused == True:
+        send_game("pause 0")
+    if not state or state.pause_menu == False:
+        send_game("pause_menu 1")
     return
 
 
@@ -884,6 +888,7 @@ def update(
     errors = collect_errors(points, para.last_valid, w, h)
     para.state = game_state()
     prevent_player_pause(para.state)
+    unpause_menu(para.state)
     
     match mode:
         case "setup":
@@ -913,7 +918,7 @@ def update(
                 para.timer = time.time()
             overlay([command("clear"), command("batch", {"items": items})])
         case "playing":
-            if len(errors) > 0:
+            if len(errors) > 1 or (len(errors) == 1 and errors[0] != "hands_wrong"):
                 mode = "fixing"
                 pause(para.state)
             else:
@@ -975,23 +980,26 @@ def main() -> None:
     mode = "setup"
 
     # Main Loop
-    while cap.isOpened():
-        # Optains Points from frame
-        ret, frame = cap.read()
-        if not ret:
-            continue
-        points = findPoints(frame)
-        if not points:
-            continue
+    try:
+        while cap.isOpened():
+            # Optains Points from frame
+            ret, frame = cap.read()
+            if not ret:
+                continue
+            points = findPoints(frame)
+            if not points:
+                continue
 
-        # runs update
-        mode = update(points, mode, w, h)
-
-        # if cv2.waitKey(1) == ord("q"):
-        #     break
-
-    cap.release()
-    cv2.destroyAllWindows()
+            # runs update
+            mode = update(points, mode, w, h)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        cap.release()
+        cv2.destroyAllWindows()
+        release_player(para.state)
+        overlay([command("clear")])
+        print("\nStopped")
 
 
 if __name__ == "__main__":

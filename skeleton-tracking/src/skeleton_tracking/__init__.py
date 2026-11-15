@@ -123,6 +123,8 @@ class Points:
     """The center of rotation in screen pixels"""
     shoulder_mid: Point
     """The center of rotation in screen pixels"""
+    hammer_tip: Point
+    """The tip of the hammer assuming the hammer points in towards the rotation center"""
     hand_dist: float
     """The distance between the two hands in screen pixels"""
     shoulder_dist: float
@@ -141,6 +143,7 @@ class Points:
         self.shoulder_dist = self.left_shoulder.dist(self.right_shoulder)
         self.hand_dist = self.left_hand.dist(self.right_hand)
         
+        # - Rotation Center ---
         # How much to move it down by
         HMTMIDB = self.shoulder_dist * 0.4
 
@@ -152,6 +155,13 @@ class Points:
 
         self.rotation_center = self.shoulder_mid + (PERP_UNIT * HMTMIDB)
 
+        # - Hammer Tip --------
+        self.hammer_tip = self.hands - self.rotation_center
+        # Hammer length: 2.6 shoulder_dist
+        self.hammer_tip -= self.hammer_tip / self.hammer_tip.length() * self.shoulder_dist * 2.6
+        self.hammer_tip += self.rotation_center
+
+        # - Hands angle -------
         HAND_VECTOR = self.hands - self.rotation_center
         
         SHOULDER_ANGLE = math.atan2(
@@ -929,6 +939,7 @@ def update(
                         command("batch", {"items": construct(points, mode, w, h)}),
                     ]
                 )
+                place_hammer((points.hands_angle + math.pi / 2) * 180 / math.pi, (points.hammer_tip - points.rotation_center).length() / points.shoulder_dist * SHOULDER_DIST_TO_GAME_UNIT)
         case "fixing":
             overlay(
                 [

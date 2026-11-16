@@ -244,11 +244,25 @@ class State:
         self.cursor_target = Point(state["wx"], state["wy"]) if state.get("wx") else None
         # self.method = state["mt"]
 
+# - CodeCell -------------------------------------
+class CodeCell:
+    """The data recived from potential CodeCell"""
+    angle: float
+    """The angle relative to the direction of gravity"""
+    charge: float
+    """Percentage charge of the CodeCell"""
+
+    def __init__(self, state: list[str]) -> None:
+        self.angle = float(state[0])
+        self.charge = float(state[1])
+
 # - Parameters -----------------------------------
 class Parameters:
     """Common shared paramters"""
     state: State | None = None
     """The current game state"""
+    codecell: CodeCell | None
+    """The current state of the CodeCell"""
     timer: float = time.time()
     """Used for measuring time"""
     last_valid: Points | None = None
@@ -264,6 +278,7 @@ class Parameters:
 
 para = Parameters()
 """The globally shared parameters"""
+
 # --- Color ----------------------------------------------------------------
 def interpolate_color(color1: str, color2: str, factor: float) -> str:
     """Interpolates between two hex colors."""
@@ -784,7 +799,7 @@ def construct(points: Points, mode: str, w: int, h: int) -> list[dict[str,Any]]:
 
 
 # --- Handling Game Interaction --------------------------------------------
-rx = socket.socket(socket.AF_INET, socket.SOCK_DGRAM); rx.bind(("127.0.0.1", 9877)); rx.settimeout(5)
+rx_game = socket.socket(socket.AF_INET, socket.SOCK_DGRAM); rx_game.bind(("127.0.0.1", 9877)); rx_game.settimeout(5)
 tx = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 
 def send_game(msg: str):
@@ -796,17 +811,17 @@ def game_state(time_out: float = 500) -> State | None:
     If nothing arrives, it returns None."""
     time_out /= 1000
     while True:
-        rx.settimeout(time_out)
+        rx_game.settimeout(time_out)
         try:
-            last: dict = json.loads(rx.recv(65536)); break
+            last: dict = json.loads(rx_game.recv(65536)); break
         except socket.timeout:
             return None
-    rx.setblocking(False)
+    rx_game.setblocking(False)
     try:
-        while True: last: dict = json.loads(rx.recv(65536))
+        while True: last: dict = json.loads(rx_game.recv(65536))
     except BlockingIOError:
         pass
-    rx.settimeout(5)
+    rx_game.settimeout(5)
     if last.get("fo") is False and not last.get("bg", False):
         print("[game window unfocused and runInBackground is off - it may stall]", flush=True)
     return State(last)
@@ -871,12 +886,36 @@ def get_expected_handposition(rotation_point: Point, hammer_tip: Point) -> Point
     return hammer - (Point(math.sin(ang), math.cos(ang)) * 1.96)
 
 
+# --- CodeCell -------------------------------------------------------------
+rx_codecell = socket.socket(socket.AF_INET, socket.SOCK_DGRAM); rx_codecell.bind(("0.0.0.0", 4210)); rx_codecell.settimeout(5)
+
+def codecell(time_out: float = 5) -> CodeCell | None:
+    """Return the NEWEST packet: block for one, then drain everything queued behind it.
+    If nothing arrives, it returns None."""
+    time_out /= 1000
+    while True:
+        rx_codecell.settimeout(time_out)
+        try:
+            last = rx_codecell.recvfrom(256)[0].decode('utf-8').strip().split(','); break
+        except socket.timeout:
+            return None
+    rx_codecell.setblocking(False)
+    try:
+        while True: last = rx_codecell.recvfrom(256)[0].decode('utf-8').strip().split(',')
+    except BlockingIOError:
+        pass
+    rx_codecell.settimeout(5)
+    
+    return CodeCell(last)
+
+
 # --- Main -----------------------------------------------------------------
 def update(
     points: Points, mode: str, w: int, h: int
 ) -> str:
     errors = collect_errors(points, para.last_valid, w, h)
     para.state = game_state()
+    para.codecell = codecell()
     prevent_player_pause(para.state)
     unpause_menu(para.state)
     

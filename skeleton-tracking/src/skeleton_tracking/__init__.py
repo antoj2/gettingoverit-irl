@@ -123,8 +123,6 @@ class Points:
     """The center of rotation in screen pixels"""
     shoulder_mid: Point
     """The center of rotation in screen pixels"""
-    hammer_tip: Point
-    """The tip of the hammer assuming the hammer points in towards the rotation center"""
     hand_dist: float
     """The distance between the two hands in screen pixels"""
     shoulder_dist: float
@@ -155,12 +153,6 @@ class Points:
 
         self.rotation_center = self.shoulder_mid + (PERP_UNIT * HMTMIDB)
 
-        # - Hammer Tip --------
-        self.hammer_tip = self.hands - self.rotation_center
-        # Hammer length: 2.6 shoulder_dist
-        self.hammer_tip -= self.hammer_tip / self.hammer_tip.length() * self.shoulder_dist * 2.6
-        self.hammer_tip += self.rotation_center
-
         # - Hands angle -------
         HAND_VECTOR = self.hands - self.rotation_center
         
@@ -171,11 +163,7 @@ class Points:
         
         HAND_ANGLE = math.atan2(HAND_VECTOR.y, HAND_VECTOR.x)
         
-        self.hands_angle = HAND_ANGLE - (SHOULDER_ANGLE + math.pi / 2)
-        
-        self.hands_angle = (
-            self.hands_angle + math.pi
-        ) % (2 * math.pi) - math.pi
+        self.hands_angle = HAND_ANGLE - (SHOULDER_ANGLE)
 
 
     def normalized(self) -> Self:
@@ -860,13 +848,7 @@ def unpause_menu(state: State | None = None):
 
 def place_hammer(ang: float, ext: float):
     """Put the hammer at an angle (degrees, 0 = pointing right, counter-clockwise) and a distance from the hinge pivot (in world units and degrees)."""
-    send_game(f"H {ang} {ext}")
-    return
-
-
-def place_cursor(pos: Point):
-    """Put the in-game cursor at a world position."""
-    send_game(f"W {pos.x} {pos.y}")
+    send_game(f"H {ang} {max(1, ext)}")
     return
 
 
@@ -939,7 +921,14 @@ def update(
                         command("batch", {"items": construct(points, mode, w, h)}),
                     ]
                 )
-                place_hammer((points.hands_angle + math.pi / 2) * 180 / math.pi, (points.hammer_tip - points.rotation_center).length() / points.shoulder_dist * SHOULDER_DIST_TO_GAME_UNIT)
+                HANDS = (points.hands - points.rotation_center) / points.shoulder_dist * SHOULDER_DIST_TO_GAME_UNIT
+                # Relative position from center of rotation of hands in game units
+                HAMMER = Point(math.cos(points.hands_angle), math.sin(points.hands_angle)) * 1.96
+                # Relative position from center of rotation of hammer in game units
+                EXTENSION = (HAMMER - HANDS).length()
+                # 
+                ANGLE = points.hands_angle * 180 / math.pi
+                place_hammer(ANGLE, EXTENSION)
         case "fixing":
             overlay(
                 [
@@ -1007,8 +996,7 @@ def main() -> None:
         pass
     finally:
         cap.release()
-        cv2.destroyAllWindows()
-        release_player(para.state)
+        release_player()
         overlay([command("clear")])
         print("\nStopped")
 

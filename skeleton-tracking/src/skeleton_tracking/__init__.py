@@ -858,10 +858,8 @@ def release_player(state: State | None = None):
         send_game("off")
     if not state or state.block_pause == True:
         send_game("set block_pause 0")
-    if not state or state.paused == True:
-        send_game("pause 0")
-    if not state or state.pause_menu == False:
-        send_game("pause_menu 1")
+    unpause(state)
+    pause_menu(state)
     return
 
 

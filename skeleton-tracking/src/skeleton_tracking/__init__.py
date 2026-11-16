@@ -11,13 +11,17 @@ import math
 import time
 import socket, json, time, math
 
-SHOULDER_DIST_TO_GAME_UNIT = 1.96/2.6
+HAMMER_LENGTH_GAME_UNIT = 1.96
+"""The length of the hammer in game units"""
+HAMMER_LENGTH_SHOULDER_DIST = 2.6
+"""The length of the hammer in shoulder distances"""
+SHOULDER_DIST_TO_GAME_UNIT = HAMMER_LENGTH_GAME_UNIT/HAMMER_LENGTH_SHOULDER_DIST
 """
 Approx 2.6 shoulder lengths go into length of hammer, length of hammer approx 1.96 game units
 
 Multiply shoulder_length with SHOULDER_DIST_TO_GAME_UNIT to get game_unit
 """
-GAME_UNIT_TO_SHOULDER_DIST = 2.6/1.96
+GAME_UNIT_TO_SHOULDER_DIST = HAMMER_LENGTH_SHOULDER_DIST/HAMMER_LENGTH_GAME_UNIT
 """
 Approx 2.6 shoulder lengths go into length of hammer, length of hammer approx 1.96 game units
 
@@ -248,7 +252,7 @@ class State:
 class CodeCell:
     """The data recived from potential CodeCell"""
     angle: float
-    """The angle relative to the direction of gravity"""
+    """The angle relative to the direction of gravity in radians"""
     charge: float
     """Percentage charge of the CodeCell"""
 
@@ -262,12 +266,14 @@ class Parameters:
     state: State | None = None
     """The current game state"""
     codecell: CodeCell | None
-    """The current state of the CodeCell"""
+    """The current state of the CodeCell if it is available"""
     timer: float = time.time()
     """Used for measuring time"""
     last_valid: Points | None = None
     """Last valid combination of body tracking markers"""
     expected_handpos: Point | None = None
+    """The point where the game expects your hands to be located"""
+    use_codecell: bool = False
     """The point where the game expects your hands to be located"""
     
     def __init__(self, para: dict[str,Any] = {}) -> None:
@@ -275,6 +281,7 @@ class Parameters:
         self.timer = para.get("timer") or time.time()
         self.last_valid = para.get("last_valid")
         self.expected_handpos = para.get("expected_handpos")
+        self.use_codecell = para.get("use_codecell") or False
 
 para = Parameters()
 """The globally shared parameters"""
@@ -308,7 +315,8 @@ def interpolate_color(color1: str, color2: str, factor: float) -> str:
 # --- Overlay output -------------------------------------------------------
 # Commands are sent as JSON over UDP to the overlay instead of being drawn on the frame.
 OVERLAY_ADDR = ("127.0.0.1", int(os.environ.get("OVERLAY_PORT", "45454")))
-MIRROR = True  # the camera view is mirrored for the player, like the old flipped frame
+MIRROR = True  # the camera view is mirrored for the player
+# Note to self: pretty much none of the code has been tested with this set to False. I just noticied it now and I've realized that a lot of the math I've been struggling with might be because the math I did assumed plus is plus and minus is minus, which it isn't always when this is True.
 TTL_MS = 1000  # drawn items vanish by themselves if tracking stops sending updates after this time
 _sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 
@@ -447,7 +455,7 @@ def findPoints(
     frame: cv2.typing.MatLike,
     detector: Any = vision.PoseLandmarker.create_from_options(options),
 ) -> Points | None:
-    """Returns (leftHand, rightHand, leftShoulder, rightShoulder, centerOfBody)"""
+    """Returns the position of relevant body markers from skeleton tracking"""
     h, w, _ = frame.shape
 
     rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
@@ -759,7 +767,7 @@ def construct(points: Points, mode: str, w: int, h: int) -> list[dict[str,Any]]:
             items.append(dot("expected_hands", exp_hands, w, h, color, 0.015))
             items.append(dot("hands", points.hands, w, h, color))
         return items
-    # - Setup ---------------------
+    # - Playing -------------------
     if mode == "playing":
         items.append(
             text(
@@ -882,14 +890,13 @@ def get_expected_handposition(rotation_point: Point, hammer_tip: Point) -> Point
     """Gets where the hands should be located relative to the center based on how the in-game player is positioned"""
     hammer = hammer_tip - rotation_point
     ang = math.atan2(hammer.x, hammer.y)
-    # hammer length: 1.96
-    return hammer - (Point(math.sin(ang), math.cos(ang)) * 1.96)
+    return hammer - (Point(math.sin(ang), math.cos(ang)) * HAMMER_LENGTH_GAME_UNIT)
 
 
 # --- CodeCell -------------------------------------------------------------
 rx_codecell = socket.socket(socket.AF_INET, socket.SOCK_DGRAM); rx_codecell.bind(("0.0.0.0", 4210)); rx_codecell.settimeout(5)
 
-def codecell(time_out: float = 5) -> CodeCell | None:
+def codecell(time_out: float = 250) -> CodeCell | None:
     """Return the NEWEST packet: block for one, then drain everything queued behind it.
     If nothing arrives, it returns None."""
     time_out /= 1000
@@ -909,13 +916,36 @@ def codecell(time_out: float = 5) -> CodeCell | None:
     return CodeCell(last)
 
 
+CODECELL_DEAD_ZONE = math.radians(15)
+"""Within this angle of horizontal, the CodeCell can't tell the two hammer directions apart"""
+
+def hammer_angle(hands_angle: float, codecell_angle: float | None) -> float | None:
+    """Angle in degrees for `place_hammer` (0 = right, counter-clockwise).
+    Without a CodeCell the hammer always points inward, as before."""
+    if codecell_angle is None:
+        hammer_inward = True
+        return math.degrees(hands_angle)
+
+    inward_up = math.sin(hands_angle)    # >0: tip would point up if inward
+    cell_up = math.cos(codecell_angle)   # >0: CodeCell says tip points up
+    limit = math.sin(CODECELL_DEAD_ZONE)
+    if abs(inward_up) > limit and abs(cell_up) > limit:
+        hammer_inward = (inward_up > 0) == (cell_up > 0)
+    else:
+        return
+
+    if hammer_inward:
+        return math.degrees(hands_angle)
+    return math.degrees(hands_angle - math.copysign(math.pi, hands_angle))
+
+
 # --- Main -----------------------------------------------------------------
 def update(
     points: Points, mode: str, w: int, h: int
 ) -> str:
     errors = collect_errors(points, para.last_valid, w, h)
     para.state = game_state()
-    para.codecell = codecell()
+    para.codecell = codecell() if para.use_codecell else None
     prevent_player_pause(para.state)
     unpause_menu(para.state)
     
@@ -961,14 +991,18 @@ def update(
                         command("batch", {"items": construct(points, mode, w, h)}),
                     ]
                 )
-                HANDS = (points.hands - points.rotation_center) / points.shoulder_dist * SHOULDER_DIST_TO_GAME_UNIT
-                # Relative position from center of rotation of hands in game units
-                HAMMER = Point(math.cos(points.hands_angle), math.sin(points.hands_angle)) * 1.96
-                # Relative position from center of rotation of hammer in game units
-                EXTENSION = (HAMMER - HANDS).length()
-                # 
-                ANGLE = points.hands_angle * 180 / math.pi
-                place_hammer(ANGLE, EXTENSION)
+                HANDS_DIST = (points.hands - points.rotation_center).length() / points.shoulder_dist * SHOULDER_DIST_TO_GAME_UNIT
+                # Distance from center of rotation to hands in game units
+                ANGLE = hammer_angle(points.hands_angle, para.codecell.angle if para.codecell else None)
+                if ANGLE == None:
+                    mode = "fixing"
+                    pause(para.state)
+                    print("CodeCell angle to far from hand angle")
+                else:
+                    # Inward: ANGLE == hands_angle, so cos = 1 and EXTENSION = L - r
+                    # Outward: ANGLE == hands_angle + 180, so cos = -1 and EXTENSION = L + r
+                    EXTENSION = HAMMER_LENGTH_GAME_UNIT - HANDS_DIST * math.cos(points.hands_angle - math.radians(ANGLE))
+                    place_hammer(ANGLE, EXTENSION)
         case "fixing":
             overlay(
                 [
@@ -1018,6 +1052,10 @@ def main() -> None:
     h, w, _ = frame.shape
 
     mode = "setup"
+
+    if codecell():
+        para.use_codecell = True
+        print("Bruger CodeCell til at korrigere vinkler.")
 
     # Main Loop
     try:

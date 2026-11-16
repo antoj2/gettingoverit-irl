@@ -911,6 +911,9 @@ def update(
             overlay([command("clear"), command("batch", {"items": items})])
         case "playing":
             if len(errors) > 1 or (len(errors) == 1 and errors[0] != "hands_wrong"):
+                for error in errors:
+                    if error != "hands_wrong":
+                        print("Error: " + error)
                 mode = "fixing"
                 pause(para.state)
             else:

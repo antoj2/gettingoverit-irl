@@ -949,7 +949,7 @@ def update(
         case "_":
             raise ValueError(f"{mode} is not a valid mode")
 
-    if len(errors) == 0:
+    if mode == "playing":
         para.last_valid = points
 
     return mode

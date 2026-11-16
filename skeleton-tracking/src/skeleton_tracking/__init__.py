@@ -273,6 +273,8 @@ class Parameters:
     """Last valid combination of body tracking markers"""
     expected_handpos: Point | None = None
     """The point where the game expects your hands to be located"""
+    hammer_inward: bool = False
+    """True if the hammer tip is on the opposite side of the rotation center from the hands"""
     use_codecell: bool = False
     """The point where the game expects your hands to be located"""
     
@@ -281,6 +283,7 @@ class Parameters:
         self.timer = para.get("timer") or time.time()
         self.last_valid = para.get("last_valid")
         self.expected_handpos = para.get("expected_handpos")
+        self.hammer_inward = para.get("hammer_inward") or False
         self.use_codecell = para.get("use_codecell") or False
 
 para = Parameters()
@@ -919,22 +922,18 @@ def codecell(time_out: float = 250) -> CodeCell | None:
 CODECELL_DEAD_ZONE = math.radians(15)
 """Within this angle of horizontal, the CodeCell can't tell the two hammer directions apart"""
 
-def hammer_angle(hands_angle: float, codecell_angle: float | None) -> float | None:
+def hammer_angle(hands_angle: float, codecell_angle: float | None) -> float:
     """Angle in degrees for `place_hammer` (0 = right, counter-clockwise).
     Without a CodeCell the hammer always points inward, as before."""
-    if codecell_angle is None:
-        hammer_inward = True
-        return math.degrees(hands_angle)
+    if codecell_angle is not None:
+        inward_up = math.sin(hands_angle)    # >0: tip would point up if inward
+        cell_up = math.cos(codecell_angle)   # >0: CodeCell says tip points up
+        limit = math.sin(CODECELL_DEAD_ZONE)
+        if abs(inward_up) > limit and abs(cell_up) > limit:
+            para.hammer_inward = (inward_up > 0) == (cell_up > 0)
+        # otherwise keep the previous decision
 
-    inward_up = math.sin(hands_angle)    # >0: tip would point up if inward
-    cell_up = math.cos(codecell_angle)   # >0: CodeCell says tip points up
-    limit = math.sin(CODECELL_DEAD_ZONE)
-    if abs(inward_up) > limit and abs(cell_up) > limit:
-        hammer_inward = (inward_up > 0) == (cell_up > 0)
-    else:
-        return
-
-    if hammer_inward:
+    if para.hammer_inward:
         return math.degrees(hands_angle)
     return math.degrees(hands_angle - math.copysign(math.pi, hands_angle))
 
@@ -994,15 +993,10 @@ def update(
                 HANDS_DIST = (points.hands - points.rotation_center).length() / points.shoulder_dist * SHOULDER_DIST_TO_GAME_UNIT
                 # Distance from center of rotation to hands in game units
                 ANGLE = hammer_angle(points.hands_angle, para.codecell.angle if para.codecell else None)
-                if ANGLE == None:
-                    mode = "fixing"
-                    pause(para.state)
-                    print("CodeCell angle to far from hand angle")
-                else:
-                    # Inward: ANGLE == hands_angle, so cos = 1 and EXTENSION = L - r
-                    # Outward: ANGLE == hands_angle + 180, so cos = -1 and EXTENSION = L + r
-                    EXTENSION = HAMMER_LENGTH_GAME_UNIT - HANDS_DIST * math.cos(points.hands_angle - math.radians(ANGLE))
-                    place_hammer(ANGLE, EXTENSION)
+                # Inward: ANGLE == hands_angle, so cos = 1 and EXTENSION = L - r
+                # Outward: ANGLE == hands_angle + 180, so cos = -1 and EXTENSION = L + r
+                EXTENSION = HAMMER_LENGTH_GAME_UNIT - HANDS_DIST * math.cos(points.hands_angle - math.radians(ANGLE))
+                place_hammer(ANGLE, EXTENSION)
         case "fixing":
             overlay(
                 [

@@ -924,13 +924,13 @@ CODECELL_DEAD_ZONE = math.radians(15)
 
 def hammer_angle(hands_angle: float, codecell_angle: float | None) -> float:
     """Angle in degrees for `place_hammer` (0 = right, counter-clockwise).
-    Without a CodeCell the hammer always points inward, as before."""
+    Without a CodeCell the hammer simply remember direction"""
     if codecell_angle is not None:
-        inward_up = math.sin(hands_angle)    # >0: tip would point up if inward
-        cell_up = math.cos(codecell_angle)   # >0: CodeCell says tip points up
+        hands_up = math.sin(hands_angle)    # >0: tip would point up if inward
+        cell_up = math.cos(codecell_angle)  # >0: CodeCell says tip points up
         limit = math.sin(CODECELL_DEAD_ZONE)
-        if abs(inward_up) > limit and abs(cell_up) > limit:
-            para.hammer_inward = (inward_up > 0) == (cell_up > 0)
+        if abs(hands_up) > limit and abs(cell_up) > limit:
+            para.hammer_inward = (hands_up > 0) == (cell_up > 0)
         # otherwise keep the previous decision
 
     if para.hammer_inward:

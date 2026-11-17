@@ -65,6 +65,9 @@ class Point:
     def __div__(self, other: float) -> Self:
         return type(self)(self.x / other, self.y / other)
 
+    def __neg__(self) -> Self:
+        return type(self)(-self.x, -self.y)
+
     @classmethod
     def from_landmark(cls, lm: Any) -> Self:
         return cls(lm.x, lm.y)
@@ -522,8 +525,8 @@ def collect_errors(points: Points, w: int, h: int, max_arm=2.2) -> list[str]:
     hand_dist = points.left_hand.dist(points.right_hand)
     if hand_dist > shoulder_dist:
         errors.append("hands_together")
-    if para.state and para.state.hammer_tip and para.state.rotation_point:
-        exp_hands = get_expected_handposition(para.state.hammer_tip, para.state.rotation_point) * GAME_UNIT_TO_SHOULDER_DIST * points.shoulder_dist + points.rotation_center
+    if para.expected_handpos:
+        exp_hands = para.expected_handpos * GAME_UNIT_TO_SHOULDER_DIST * points.shoulder_dist + points.rotation_center
         dist = points.hands.dist(exp_hands) / points.shoulder_dist
         if dist > THRESHOLD_DIST:
             errors.append("hands_wrong")
@@ -629,8 +632,8 @@ def display_errors(
                 "#20990000",
             )
         )
-        if para.state and para.state.hammer_tip and para.state.rotation_point:
-            exp_hands = get_expected_handposition(para.state.hammer_tip, para.state.rotation_point) * GAME_UNIT_TO_SHOULDER_DIST * points.shoulder_dist + points.rotation_center
+        if para.expected_handpos:
+            exp_hands = para.expected_handpos * GAME_UNIT_TO_SHOULDER_DIST * points.shoulder_dist + points.rotation_center
             dist = points.hands.dist(exp_hands) / points.shoulder_dist
             color = interpolate_color("#00FF00", "#FF0000", dist)
             items.append(arrow("hands_arrow", points.hands, exp_hands, w, h, color))
@@ -742,8 +745,8 @@ def construct(points: Points, mode: str, w: int, h: int) -> list[dict[str,Any]]:
                     "#20800000",
                 )
             )
-        elif para.state and para.state.hammer_tip and para.state.rotation_point:
-            exp_hands = get_expected_handposition(para.state.hammer_tip, para.state.rotation_point) * GAME_UNIT_TO_SHOULDER_DIST * points.shoulder_dist + points.rotation_center
+        elif para.expected_handpos:
+            exp_hands = para.expected_handpos * GAME_UNIT_TO_SHOULDER_DIST * points.shoulder_dist + points.rotation_center
             dist = points.hands.dist(exp_hands) / points.shoulder_dist
             color = interpolate_color("#00FF00", "#FF0000", dist)
             if (dist > THRESHOLD_DIST):
@@ -1245,6 +1248,7 @@ def update(
     errors = collect_errors(points, w, h)
     para.state = game_state()
     para.codecell = codecell() if para.use_codecell else None
+    para.expected_handpos = -get_expected_handposition(para.state.rotation_point, para.state.hammer_tip) if para.state and para.state.rotation_point and para.state.hammer_tip else None
     prevent_player_pause(para.state)
     unpause_menu(para.state)
     

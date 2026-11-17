@@ -274,6 +274,8 @@ class Parameters:
     """Used for measuring time"""
     expected_handpos: Point | None = None
     """The point where the game expects your hands to be located"""
+    last_handpos: Point | None = None
+    """The point where your hands were last frame"""
     use_codecell: bool = False
     """The point where the game expects your hands to be located"""
     
@@ -511,19 +513,18 @@ def collect_errors(points: Points, w: int, h: int, max_arm=2.2) -> list[str]:
         errors.append("hands_outside")
     if not points.left_shoulder.inside_bounds(0, 0, w, h) or not points.right_shoulder.inside_bounds(0, 0, w, h):
         errors.append("shoulders_outside")
-    shoulder_dist = points.left_shoulder.dist(points.right_shoulder)
-    MAX_ARM = shoulder_dist * max_arm
+    MAX_ARM = points.shoulder_dist * max_arm
     if not points.left_shoulder.inside_bounds(
         MAX_ARM, MAX_ARM, w - MAX_ARM, h - MAX_ARM
     ) or not points.right_shoulder.inside_bounds(
         MAX_ARM, MAX_ARM, w - MAX_ARM, h - MAX_ARM
     ):
-        if shoulder_dist + MAX_ARM * 2 > w:
+        if points.shoulder_dist + MAX_ARM * 2 > w:
             errors.append("too_close")
         else:
             errors.append("not_middle")
     hand_dist = points.left_hand.dist(points.right_hand)
-    if hand_dist > shoulder_dist:
+    if hand_dist > points.shoulder_dist + para.last_handpos.dist(points.hands) if para.last_handpos else 0:
         errors.append("hands_together")
     if para.expected_handpos:
         exp_hands = para.expected_handpos * GAME_UNIT_TO_SHOULDER_DIST * points.shoulder_dist + points.rotation_center
@@ -1376,6 +1377,7 @@ def main() -> None:
 
             # runs update
             mode = update(points, mode, w, h)
+            para.last_handpos = points.hands
     except KeyboardInterrupt:
         pass
     finally:

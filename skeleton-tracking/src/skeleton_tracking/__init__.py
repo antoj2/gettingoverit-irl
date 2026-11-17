@@ -269,8 +269,6 @@ class Parameters:
     """The current state of the CodeCell if it is available"""
     timer: float = time.time()
     """Used for measuring time"""
-    last_valid: Points | None = None
-    """Last valid combination of body tracking markers"""
     expected_handpos: Point | None = None
     """The point where the game expects your hands to be located"""
     use_codecell: bool = False
@@ -279,7 +277,6 @@ class Parameters:
     def __init__(self, para: dict[str,Any] = {}) -> None:
         self.state = para.get("state")
         self.timer = para.get("timer") or time.time()
-        self.last_valid = para.get("last_valid")
         self.expected_handpos = para.get("expected_handpos")
         self.use_codecell = para.get("use_codecell") or False
 
@@ -504,7 +501,7 @@ def findPoints(
 
 
 # --- Overlay construction -------------------------------------------------
-def collect_errors(points: Points, last_valid: Points | None, w: int, h: int, max_arm=2.2) -> list[str]:
+def collect_errors(points: Points, w: int, h: int, max_arm=2.2) -> list[str]:
     errors: list[str] = []
 
     if not points.left_hand.inside_bounds(0, 0, w, h) or not points.right_hand.inside_bounds(0, 0, w, h):
@@ -525,8 +522,11 @@ def collect_errors(points: Points, last_valid: Points | None, w: int, h: int, ma
     hand_dist = points.left_hand.dist(points.right_hand)
     if hand_dist > shoulder_dist:
         errors.append("hands_together")
-    if last_valid and points.normalized().hands.dist(last_valid.normalized().hands) > THRESHOLD_DIST:
-        errors.append("hands_wrong")
+    if para.state and para.state.hammer_tip and para.state.rotation_point:
+        exp_hands = get_expected_handposition(para.state.hammer_tip, para.state.rotation_point) * GAME_UNIT_TO_SHOULDER_DIST * points.shoulder_dist + points.rotation_center
+        dist = points.hands.dist(exp_hands) / points.shoulder_dist
+        if dist > THRESHOLD_DIST:
+            errors.append("hands_wrong")
 
     return errors
 
@@ -615,7 +615,7 @@ def display_errors(
         items.append(dot("right_hand", points.right_hand, w, h, "#ff0000", r=0.01))
         items.append(dot("left_hand", points.left_hand, w, h, "#ff0000", r=0.01))
         offset += SIZE * 1.5
-    elif "hands_wrong" in errors and para.last_valid:
+    elif "hands_wrong" in errors:
         items.append(
             text(
                 "hands_wrong",
@@ -629,7 +629,11 @@ def display_errors(
                 "#20990000",
             )
         )
-        items.append(arrow("hand_dist", points.hands, para.last_valid.hands - para.last_valid.rotation_center + points.rotation_center, w, h, interpolate_color("#00FF00", "#FF0000", points.normalized().hands.dist(para.last_valid.normalized().hands) * 2)))
+        if para.state and para.state.hammer_tip and para.state.rotation_point:
+            exp_hands = get_expected_handposition(para.state.hammer_tip, para.state.rotation_point) * GAME_UNIT_TO_SHOULDER_DIST * points.shoulder_dist + points.rotation_center
+            dist = points.hands.dist(exp_hands) / points.shoulder_dist
+            color = interpolate_color("#00FF00", "#FF0000", dist)
+            items.append(arrow("hands_arrow", points.hands, exp_hands, w, h, color))
         offset += SIZE * 1.5
 
     return items
@@ -653,7 +657,7 @@ def construct(points: Points, mode: str, w: int, h: int) -> list[dict[str,Any]]:
                 bold=True,
             )
         )
-        errors = collect_errors(points, None, w, h, max_arm=2.3)
+        errors = collect_errors(points, w, h, max_arm=2.3)
         if not para.state:
             items.append(
                 text(
@@ -739,9 +743,8 @@ def construct(points: Points, mode: str, w: int, h: int) -> list[dict[str,Any]]:
                 )
             )
         elif para.state and para.state.hammer_tip and para.state.rotation_point:
-            shoulder_dist = points.left_shoulder.dist(points.right_shoulder)
-            exp_hands = get_expected_handposition(para.state.hammer_tip, para.state.rotation_point) * GAME_UNIT_TO_SHOULDER_DIST * shoulder_dist + points.rotation_center
-            dist = points.hands.dist(exp_hands) / shoulder_dist
+            exp_hands = get_expected_handposition(para.state.hammer_tip, para.state.rotation_point) * GAME_UNIT_TO_SHOULDER_DIST * points.shoulder_dist + points.rotation_center
+            dist = points.hands.dist(exp_hands) / points.shoulder_dist
             color = interpolate_color("#00FF00", "#FF0000", dist)
             if (dist > THRESHOLD_DIST):
                 items.append(
@@ -759,7 +762,7 @@ def construct(points: Points, mode: str, w: int, h: int) -> list[dict[str,Any]]:
                 )
             
                 arrow_offset = (exp_hands - points.hands)
-                arrow_offset = arrow_offset / arrow_offset.length() * (dist * shoulder_dist - 10)
+                arrow_offset = arrow_offset / arrow_offset.length() * (dist * points.shoulder_dist - 10)
                 items.append(arrow("hands_arrow", points.hands, points.hands + arrow_offset, w, h, color[:1] + '80' + color[3:], 0.006))
             
             # This could be replaced by a "circle" function instead of two dots, it would then have an outline paramter and a fill paramter.
@@ -1239,7 +1242,7 @@ hammer_tracker = HammerTracker()
 def update(
     points: Points, mode: str, w: int, h: int
 ) -> str:
-    errors = collect_errors(points, para.last_valid, w, h)
+    errors = collect_errors(points, w, h)
     para.state = game_state()
     para.codecell = codecell() if para.use_codecell else None
     prevent_player_pause(para.state)
@@ -1267,7 +1270,6 @@ def update(
                     )
                 )
                 if 5 + para.timer - time.time() <= 0.05:
-                    para.last_valid = points
                     hammer_tracker.resync(
                         para.state.hammer_tip if para.state else None,
                         para.state.rotation_point if para.state else None,
@@ -1324,9 +1326,6 @@ def update(
                 mode = "playing"
         case "_":
             raise ValueError(f"{mode} is not a valid mode")
-
-    if mode == "playing":
-        para.last_valid = points
 
     return mode
 

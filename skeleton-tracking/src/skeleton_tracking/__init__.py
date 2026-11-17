@@ -9,7 +9,7 @@ from mediapipe.tasks import python
 from mediapipe.tasks.python import vision
 import math
 import time
-import socket, json, time, math
+import socket, json
 
 HAMMER_LENGTH_GAME_UNIT = 1.96
 """The length of the hammer in game units"""
@@ -273,8 +273,6 @@ class Parameters:
     """Last valid combination of body tracking markers"""
     expected_handpos: Point | None = None
     """The point where the game expects your hands to be located"""
-    hammer_inward: bool = False
-    """True if the hammer tip is on the opposite side of the rotation center from the hands"""
     use_codecell: bool = False
     """The point where the game expects your hands to be located"""
     
@@ -283,7 +281,6 @@ class Parameters:
         self.timer = para.get("timer") or time.time()
         self.last_valid = para.get("last_valid")
         self.expected_handpos = para.get("expected_handpos")
-        self.hammer_inward = para.get("hammer_inward") or False
         self.use_codecell = para.get("use_codecell") or False
 
 para = Parameters()
@@ -922,20 +919,320 @@ def codecell(time_out: float = 250) -> CodeCell | None:
 CODECELL_DEAD_ZONE = math.radians(15)
 """Within this angle of horizontal, the CodeCell can't tell the two hammer directions apart"""
 
-def hammer_angle(hands_angle: float, codecell_angle: float | None) -> float:
-    """Angle in degrees for `place_hammer` (0 = right, counter-clockwise).
-    Without a CodeCell the hammer simply remember direction"""
-    if codecell_angle is not None:
-        hands_up = math.sin(hands_angle)    # >0: tip would point up if inward
-        cell_up = math.cos(codecell_angle)  # >0: CodeCell says tip points up
-        limit = math.sin(CODECELL_DEAD_ZONE)
-        if abs(hands_up) > limit and abs(cell_up) > limit:
-            para.hammer_inward = (hands_up > 0) == (cell_up > 0)
-        # otherwise keep the previous decision
 
-    if para.hammer_inward:
-        return math.degrees(hands_angle)
-    return math.degrees(hands_angle - math.copysign(math.pi, hands_angle))
+def _wrap(a: float) -> float:
+    """Wraps an angle in radians to [-pi, pi)"""
+    return (a + math.pi) % math.tau - math.pi
+
+
+def _sign(x: float) -> int:
+    return (x > 0) - (x < 0)
+
+
+def _clamp(x: float, lo: float, hi: float) -> float:
+    return max(lo, min(hi, x))
+
+
+class HammerTracker:
+    """Decides which end of the hammer is the tip.
+
+    The hands (relative to the rotation center) only give the hammer *line*; the tip is at
+    `hands_angle + k*pi`. k = 0 is the old `hammer_inward == True` (tip angle == hands_angle),
+    k = 1 is the old `hammer_inward == False`.
+
+    Per frame:
+      1. The hand vector (shoulder lengths, relative to the rotation center) is despiked and
+         smoothed with a One Euro filter.
+      2. A dead zone around the pivot with hysteresis (`dead_in` / `dead_out`) decides whether
+         the hand angle can be trusted at all.
+      3. Outside it, k is kept unless the other candidate is clearly nearer the predicted tip
+         angle for `switch_frames` frames in a row (anything else is a glitch). While such a
+         switch is pending the tip is held still.
+      4. Inside it, the tip coasts (angular velocity decaying). On exit the candidate nearest the
+         coasted tip wins: a straight pass flips k and keeps the tip, a bounce-back keeps k.
+         Near ties are broken by which way the hand swept around the pivot.
+      5. The CodeCell votes into a leaky accumulator; only persistent disagreement flips the tip.
+      6. The output is slew-limited to `max_rate` rad/s.
+    """
+
+    MIN_DT = 1 / 240
+    MAX_DT = 0.2
+
+    def __init__(
+        self,
+        *,
+        dead_in: float = 0.12,
+        dead_out: float = 0.20,
+        min_cutoff: float = 1.2,
+        beta: float = 6.0,
+        d_cutoff: float = 1.0,
+        max_hand_speed: float = 10.0,
+        jump_margin: float = 0.15,
+        max_rejects: int = 3,
+        omega_decay: float = 0.08,
+        switch_margin: float = 0.8,
+        switch_frames: int = 3,
+        tie_margin: float = 0.5,
+        sensor_dead_zone: float = CODECELL_DEAD_ZONE,
+        sensor_tau: float = 0.6,
+        sensor_flip: float = 0.2,
+        sensor_max_omega: float = 6.0,
+        max_rate: float = 20.0,
+        initial_inward: bool = False,
+    ) -> None:
+        self.dead_in = dead_in
+        """Enter the dead zone when the hand is closer than this to the pivot (shoulder lengths)"""
+        self.dead_out = dead_out
+        """Leave the dead zone when the hand is further than this from the pivot (shoulder lengths)"""
+        self.min_cutoff = min_cutoff
+        """One Euro: cutoff in Hz when the hand is still. Lower = smoother but laggier"""
+        self.beta = beta
+        """One Euro: how quickly the cutoff opens up with hand speed"""
+        self.d_cutoff = d_cutoff
+        """One Euro: cutoff in Hz of the speed estimate"""
+        self.max_hand_speed = max_hand_speed
+        """Fastest believable hand speed in shoulder lengths per second; faster jumps are glitches"""
+        self.jump_margin = jump_margin
+        """Extra slack in shoulder lengths on top of `max_hand_speed` before a sample is a glitch"""
+        self.max_rejects = max_rejects
+        """A 'glitch' that persists this many frames is accepted as real"""
+        self.omega_decay = omega_decay
+        """Time constant in seconds with which the coasting angular velocity dies out"""
+        self.switch_margin = switch_margin
+        """Radians the current candidate must be further from the predicted tip than the other"""
+        self.switch_frames = switch_frames
+        """Frames the other candidate must stay clearly nearer before it is accepted"""
+        self.tie_margin = tie_margin
+        """If both candidates are this close to equally far from the coasted tip, use the sweep direction"""
+        self.sensor_dead_zone = sensor_dead_zone
+        """Radians from horizontal within which the CodeCell (or the tip) is ignored as a vote"""
+        self.sensor_tau = sensor_tau
+        """Leak time constant in seconds of the CodeCell vote accumulator"""
+        self.sensor_flip = sensor_flip
+        """Accumulated disagreement (full-strength seconds) needed to flip the tip"""
+        self.sensor_max_omega = sensor_max_omega
+        """CodeCell votes are ignored while the tip turns faster than this (rad/s); accelerations fool the sensor"""
+        self.max_rate = max_rate
+        """Fastest the commanded angle may turn, rad/s"""
+        self.initial_inward = initial_inward
+        """The branch to start with when the game can't tell us"""
+
+        self.hand_angle: float = 0.0
+        """Smoothed hand angle in radians (same frame as `Points.hands_angle`)"""
+        self.hand_radius: float = 0.0
+        """Smoothed hand distance from the pivot in shoulder lengths"""
+        self.reset()
+
+    # - Public ---------------------------------------
+    @property
+    def inward(self) -> bool:
+        """True while the tip angle equals the hand angle (the old `para.hammer_inward`)"""
+        return self._k == 0
+
+    @property
+    def in_dead_zone(self) -> bool:
+        return self._dead
+
+    def reset(self) -> None:
+        """Forget everything. The next `update` starts from scratch"""
+        self._t: float | None = None
+        self._raw: tuple[float, float] | None = None
+        self._pos: tuple[float, float] | None = None
+        self._vel = (0.0, 0.0)
+        self._rejects = 0
+        self._k = 0 if self.initial_inward else 1
+        self._phi = 0.0
+        self._out = 0.0
+        self._omega = 0.0
+        self._dead = False
+        self._last_out: tuple[tuple[float, float], tuple[float, float]] | None = None
+        self._pending = 0
+        self._acc = 0.0
+        self._sync: float | None = None
+
+    def resync(self, tip: Point | None = None, pivot: Point | None = None) -> None:
+        """Restart from the in-game pose (world units). Without it, starts from `initial_inward`.
+        The tip angle is taken as atan2 in world space, 0 = right, counter-clockwise,
+        the same convention as `place_hammer`."""
+        self.reset()
+        if tip is not None and pivot is not None:
+            self._sync = math.atan2(tip.y - pivot.y, tip.x - pivot.x)
+
+    def update(
+        self,
+        hands_angle: float,
+        radius: float,
+        codecell_angle: float | None = None,
+        now: float | None = None,
+    ) -> float:
+        """Angle in degrees for `place_hammer` (0 = right, counter-clockwise).
+        
+        `hands_angle`: `Points.hands_angle` in radians.
+        
+        `radius`: distance from rotation center to the hands in shoulder lengths.
+        
+        `codecell_angle`: `CodeCell.angle` in radians (0 = up, pi = down) or None.
+        """
+        now = time.perf_counter() if now is None else now
+        raw = (radius * math.cos(hands_angle), radius * math.sin(hands_angle))
+
+        if self._pos is None or self._raw is None or self._t is None:
+            self._seed(raw, now)
+            return math.degrees(self._out)
+
+        dt = _clamp(now - self._t, self.MIN_DT, self.MAX_DT)
+        self._t = now
+
+        # Despike + smooth
+        jump = math.hypot(raw[0] - self._raw[0], raw[1] - self._raw[1])
+        limit = self.max_hand_speed * dt * (self._rejects + 1) + self.jump_margin
+        if jump > limit and self._rejects < self.max_rejects:
+            self._rejects += 1  # glitch: keep the previous smoothed position
+        else:
+            if jump > limit:  # it persisted, so it's real don't glide there slowly
+                self._pos, self._vel = raw, (0.0, 0.0)
+            else:
+                self._one_euro(raw, dt)
+            self._raw = raw
+            self._rejects = 0
+
+        x, y = self._pos
+        r, theta = math.hypot(x, y), math.atan2(y, x)
+        self.hand_angle, self.hand_radius = theta, r
+
+        # Dead zone with hysteresis
+        just_exited = False
+        if not self._dead and r < self.dead_in:
+            self._dead = True
+        elif self._dead and r > self.dead_out:
+            self._dead = False
+            just_exited = True
+            self._resolve_exit(theta)
+
+        # Track or coast
+        if self._dead:
+            self._omega *= math.exp(-dt / self.omega_decay)
+            self._phi = _wrap(self._phi + self._omega * dt)
+        else:
+            if not just_exited:
+                self._track(theta, dt)
+            self._last_out = (self._pos, self._vel)
+
+        # CodeCell
+        if codecell_angle is not None:
+            self._vote(codecell_angle, dt)
+
+        # Slew limit
+        step = self.max_rate * dt
+        self._out = _wrap(self._out + _clamp(_wrap(self._phi - self._out), -step, step))
+        return math.degrees(self._out)
+
+    # - Internals ------------------------------------
+    def _seed(self, raw: tuple[float, float], now: float) -> None:
+        self._t, self._raw, self._pos, self._vel = now, raw, raw, (0.0, 0.0)
+        r, theta = math.hypot(*raw), math.atan2(raw[1], raw[0])
+        self.hand_angle, self.hand_radius = theta, r
+        if self._sync is not None:
+            self._phi = self._sync
+            near0 = abs(_wrap(theta - self._phi))
+            near1 = abs(_wrap(theta + math.pi - self._phi))
+            self._k = 0 if near0 <= near1 else 1
+            self._sync = None
+        else:
+            self._phi = _wrap(theta + self._k * math.pi)
+        self._out = self._phi
+        self._dead = r < self.dead_in
+        if not self._dead:
+            self._last_out = (self._pos, self._vel)
+
+    @staticmethod
+    def _alpha(dt: float, cutoff: float) -> float:
+        tau = 1 / (math.tau * cutoff)
+        return 1 / (1 + tau / dt)
+
+    def _one_euro(self, raw: tuple[float, float], dt: float) -> None:
+        assert self._raw is not None and self._pos is not None
+        vx = (raw[0] - self._raw[0]) / dt
+        vy = (raw[1] - self._raw[1]) / dt
+        ad = self._alpha(dt, self.d_cutoff)
+        self._vel = (
+            self._vel[0] + ad * (vx - self._vel[0]),
+            self._vel[1] + ad * (vy - self._vel[1]),
+        )
+        a = self._alpha(dt, self.min_cutoff + self.beta * math.hypot(*self._vel))
+        self._pos = (
+            self._pos[0] + a * (raw[0] - self._pos[0]),
+            self._pos[1] + a * (raw[1] - self._pos[1]),
+        )
+
+    def _track(self, theta: float, dt: float) -> None:
+        """Outside the dead zone: stay on the current branch unless the evidence is clear"""
+        cands = (theta, theta + math.pi)
+        pred = self._phi + _clamp(self._omega * dt, -0.5, 0.5)
+        d = (abs(_wrap(cands[0] - pred)), abs(_wrap(cands[1] - pred)))
+        best = 0 if d[0] <= d[1] else 1
+
+        if best != self._k and d[self._k] - d[best] > self.switch_margin:
+            self._pending += 1
+        else:
+            self._pending = 0
+
+        if self._pending >= self.switch_frames:
+            self._k, self._pending, self._omega = best, 0, 0.0
+            self._phi = _wrap(cands[best])
+        elif self._pending:  # disputed: hold still instead of whipping the hammer around
+            self._omega *= math.exp(-dt / self.omega_decay)
+            self._phi = _wrap(pred)
+        else:
+            target = cands[self._k]
+            measured = _wrap(target - self._phi) / dt
+            self._omega = _clamp(
+                self._omega + 0.5 * (measured - self._omega), -self.max_rate, self.max_rate
+            )
+            self._phi = _wrap(target)
+
+    def _resolve_exit(self, theta: float) -> None:
+        """Leaving the dead zone: pick the candidate nearest the coasted tip"""
+        cands = (theta, theta + math.pi)
+        off = (_wrap(cands[0] - self._phi), _wrap(cands[1] - self._phi))
+        k = 0 if abs(off[0]) <= abs(off[1]) else 1
+
+        if abs(abs(off[0]) - abs(off[1])) < self.tie_margin and self._last_out and off[0]:
+            # Roughly a 90° corner. Turn the tip the way the hand swept around the pivot.
+            s = self._sweep_sign()
+            if s:
+                k = 0 if _sign(off[0]) == s else 1
+
+        self._k, self._pending, self._omega = k, 0, 0.0
+        self._phi = _wrap(cands[k])
+
+    def _sweep_sign(self) -> int:
+        """+1 if the hand passed the pivot counter-clockwise (angle increasing), -1 if clockwise"""
+        assert self._last_out is not None and self._pos is not None
+        (px, py), (vx, vy) = self._last_out
+        if math.hypot(vx, vy) >= 0.5:  # direction of travel is trustworthy: use the line
+            return _sign(px * vy - py * vx)
+        return _sign(px * self._pos[1] - py * self._pos[0])  # else the entry -> exit chord
+
+    def _vote(self, codecell_angle: float, dt: float) -> None:
+        """The CodeCell says whether the tip is up or down. Persistent disagreement flips the tip."""
+        self._acc *= math.exp(-dt / self.sensor_tau)
+        lim = math.sin(self.sensor_dead_zone)
+        tip_up = math.sin(self._phi)  # >0: we currently claim the tip points up
+        cell_up = math.cos(codecell_angle)  # >0: the CodeCell says it points up
+        if abs(self._omega) < self.sensor_max_omega and abs(tip_up) > lim and abs(cell_up) > lim:
+            self._acc -= tip_up * cell_up * dt  # strength = how far from horizontal both are
+        cap = self.sensor_flip * 1.25
+        self._acc = _clamp(self._acc, -cap, cap)
+        if self._acc > self.sensor_flip:
+            self._phi = _wrap(self._phi + math.pi)
+            self._k ^= 1
+            self._pending, self._omega = 0, 0.0
+            self._acc = -self.sensor_flip  # needs a full swing back to flip again (hysteresis)
+
+
+hammer_tracker = HammerTracker()
+"""Decides which end of the hammer is the tip"""
 
 
 # --- Main -----------------------------------------------------------------
@@ -971,6 +1268,10 @@ def update(
                 )
                 if 5 + para.timer - time.time() <= 0.05:
                     para.last_valid = points
+                    hammer_tracker.resync(
+                        para.state.hammer_tip if para.state else None,
+                        para.state.rotation_point if para.state else None,
+                    )
                     mode = "playing"
             else:
                 para.timer = time.time()
@@ -990,12 +1291,16 @@ def update(
                         command("batch", {"items": construct(points, mode, w, h)}),
                     ]
                 )
-                HANDS_DIST = (points.hands - points.rotation_center).length() / points.shoulder_dist * SHOULDER_DIST_TO_GAME_UNIT
-                # Distance from center of rotation to hands in game units
-                ANGLE = hammer_angle(points.hands_angle, para.codecell.angle if para.codecell else None)
+                ANGLE = hammer_tracker.update(
+                    points.hands_angle,
+                    (points.hands - points.rotation_center).length() / points.shoulder_dist,
+                    para.codecell.angle if para.codecell else None,
+                )
+                # Use the smoothed hand vector so angle and extension agree with each other
+                HANDS_DIST = hammer_tracker.hand_radius * SHOULDER_DIST_TO_GAME_UNIT
                 # Inward: ANGLE == hands_angle, so cos = 1 and EXTENSION = L - r
                 # Outward: ANGLE == hands_angle + 180, so cos = -1 and EXTENSION = L + r
-                EXTENSION = HAMMER_LENGTH_GAME_UNIT - HANDS_DIST * math.cos(points.hands_angle - math.radians(ANGLE))
+                EXTENSION = HAMMER_LENGTH_GAME_UNIT - HANDS_DIST * math.cos(hammer_tracker.hand_angle - math.radians(ANGLE))
                 place_hammer(ANGLE, EXTENSION)
         case "fixing":
             overlay(
@@ -1012,6 +1317,10 @@ def update(
             )
             if len(errors) == 0:
                 unpause(para.state)
+                hammer_tracker.resync(
+                    para.state.hammer_tip if para.state else None,
+                    para.state.rotation_point if para.state else None,
+                )
                 mode = "playing"
         case "_":
             raise ValueError(f"{mode} is not a valid mode")

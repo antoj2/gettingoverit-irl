@@ -1,0 +1,42 @@
+cmake_minimum_required(VERSION 3.21)
+project(GoiOverlay LANGUAGES CXX)
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_AUTOMOC ON)
+
+if(APPLE AND NOT CMAKE_PREFIX_PATH)
+  execute_process(COMMAND brew --prefix qt OUTPUT_VARIABLE BREW_QT
+                  OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
+  if(BREW_QT)
+    list(APPEND CMAKE_PREFIX_PATH "${BREW_QT}")
+  endif()
+endif()
+
+find_package(Qt6 6.5 REQUIRED COMPONENTS Widgets Network)
+
+set(SRC src/main.cpp src/Overlay.cpp)
+if(WIN32)
+  list(APPEND SRC src/platform_win.cpp)
+elseif(APPLE)
+  enable_language(OBJCXX)
+  list(APPEND SRC src/platform_mac.mm)
+else()
+  list(APPEND SRC src/platform_linux.cpp)
+endif()
+
+add_executable(goi-overlay ${SRC})
+target_link_libraries(goi-overlay PRIVATE Qt6::Widgets Qt6::Network)
+
+if(APPLE)
+  target_link_libraries(goi-overlay PRIVATE "-framework AppKit")
+endif()
+
+if(UNIX AND NOT APPLE)
+  # KDE's Qt6 binding for wlr-layer-shell (needed for overlays on Wayland)
+  find_package(LayerShellQt QUIET)
+  if(LayerShellQt_FOUND)
+    target_link_libraries(goi-overlay PRIVATE LayerShellQt::Interface)
+    target_compile_definitions(goi-overlay PRIVATE HAVE_LAYERSHELL)
+  else()
+    message(WARNING "LayerShellQt not found: overlay will NOT sit above fullscreen windows on Wayland")
+  endif()
+endif()

@@ -1,12 +1,34 @@
 # pyright: basic
+import json
 import os
+import socket
 from typing import Any, Self
 import cv2
 import mediapipe as mp
 from mediapipe.tasks import python
 from mediapipe.tasks.python import vision
 import math
+import time
+import socket, json
 
+HAMMER_LENGTH_GAME_UNIT = 1.96
+"""The length of the hammer in game units"""
+HAMMER_LENGTH_SHOULDER_DIST = 2.6
+"""The length of the hammer in shoulder distances"""
+SHOULDER_DIST_TO_GAME_UNIT = HAMMER_LENGTH_GAME_UNIT/HAMMER_LENGTH_SHOULDER_DIST
+"""
+Approx 2.6 shoulder lengths go into length of hammer, length of hammer approx 1.96 game units
+
+Multiply shoulder_length with SHOULDER_DIST_TO_GAME_UNIT to get game_unit
+"""
+GAME_UNIT_TO_SHOULDER_DIST = HAMMER_LENGTH_SHOULDER_DIST/HAMMER_LENGTH_GAME_UNIT
+"""
+Approx 2.6 shoulder lengths go into length of hammer, length of hammer approx 1.96 game units
+
+Multiply game_unit with SHOULDER_DIST_TO_GAME_UNIT to get shoulder_length
+"""
+THRESHOLD_DIST = 0.08
+"""The number of shoulder lengths away the hands must be from the correct position to be accepted"""
 
 # Initialize PoseLandmarker
 base_options = python.BaseOptions(
@@ -18,52 +40,50 @@ options = vision.PoseLandmarkerOptions(
     min_pose_detection_confidence=0.8,
     min_tracking_confidence=0.8,
 )
-
-
+# --- Classes---------------------------------------------------------------
+# - Points ---------------------------------------
 class Point:
     x: float
     y: float
-    z: float | None
 
-    def __init__(self, x: float, y: float, z: float | None = None) -> None:
+    def __init__(self, x: float, y: float) -> None:
         self.x = x
         self.y = y
-        self.z = z
 
     def __truediv__(self, other: float) -> Self:
-        return type(self)(self.x / other, self.y / other, None)
+        return type(self)(self.x / other, self.y / other)
 
     def __add__(self, other: Self) -> Self:
-        return type(self)(self.x + other.x, self.y + other.y, None)
+        return type(self)(self.x + other.x, self.y + other.y)
+
+    def __sub__(self, other: Self) -> Self:
+        return type(self)(self.x - other.x, self.y - other.y)
 
     def __mul__(self, other: float) -> Self:
-        return type(self)(self.x * other, self.y * other, None)
+        return type(self)(self.x * other, self.y * other)
+
+    def __div__(self, other: float) -> Self:
+        return type(self)(self.x / other, self.y / other)
 
     @classmethod
     def from_landmark(cls, lm: Any) -> Self:
-        return cls(lm.x, lm.y, lm.z)
+        return cls(lm.x, lm.y)
 
     @classmethod
-    def from_tuple(cls, tup: Any) -> Self:
-        return cls(tup[0], tup[1], tup[2])
+    def from_tuple(cls, tup: tuple[float, float]) -> Self:
+        return cls(tup[0], tup[1])
 
     def midpoint(self, rhs: Self) -> Self:
-        return type(self)((self.x + rhs.x) / 2, (self.y + rhs.y) / 2, None)
+        return type(self)((self.x + rhs.x) / 2, (self.y + rhs.y) / 2)
 
     def correct(self, w: int, h: int) -> Self:
-        return type(self)(self.x * w, self.y * h, None)
+        return type(self)(self.x * w, self.y * h)
 
     def as_tuple(self) -> tuple[float, float] | tuple[float, float, float]:
-        if self.z is not None:
-            return (self.x, self.y, self.z)
-        else:
-            return (self.x, self.y)
+        return (self.x, self.y)
 
     def as_tuple_int(self) -> tuple[int, int] | tuple[int, int, int]:
-        if self.z is not None:
-            return (int(self.x), int(self.y), int(self.z))
-        else:
-            return (int(self.x), int(self.y))
+        return (int(self.x), int(self.y))
 
     def dist(self, rhs: Self) -> float:
         return math.dist(self.as_tuple(), rhs.as_tuple())
@@ -74,25 +94,348 @@ class Point:
     def dot(self, rhs: Self) -> float:
         return self.x * rhs.x + self.y * rhs.y
 
+    def inside_bounds(self, x1, y1, x2, y2) -> bool:
+        return self.x >= x1 and self.x <= x2 and self.y >= y1 and self.y <= y2
 
-def average_hand(a: Point, b: Point, c: Point):
-    x = (a.x + b.x + c.x) / 3
-    y = (a.y + b.y + c.y) / 3
-    z = None
-    if a.z is not None and b.z is not None and c.z is not None:
-        z = (a.z + b.z + c.z) / 3
+    def __str__(self):
+        return f"({self.x}, {self.y})"
 
-    return Point(x, y, z)
+
+def average_point(points: list[Point]) -> Point:
+    if not points:
+        raise ValueError("Cannot calculate the average of an empty list")
+    n = len(points)
+    return Point(x=sum(p.x for p in points) / n, y=sum(p.y for p in points) / n)
+
+
+class Points:
+    """The collection of points that make up relevant body features"""
+    left_hand: Point
+    """Position of left hand in screen pixels"""
+    right_hand: Point
+    """Position of right hand in screen pixels"""
+    left_shoulder: Point
+    """Position of left shoulder in screen pixels"""
+    right_shoulder: Point
+    """Position of right shoulder in screen pixels"""
+    # body: Point
+    # """Position of center of the body on screen"""
+    
+    hands: Point
+    """The average position of hands in screen pixels"""
+    rotation_center: Point
+    """The center of rotation in screen pixels"""
+    shoulder_mid: Point
+    """The center of rotation in screen pixels"""
+    hand_dist: float
+    """The distance between the two hands in screen pixels"""
+    shoulder_dist: float
+    """The distance between the two shoulders in screen pixels"""
+    hands_angle: float
+    """The angle of the hammer based on position of hands, center of rotation and rotation of shoulders relative to the camera rotation"""
+
+    def __init__(self, points: dict[str, Point]) -> None:
+        self.left_hand = points["left_hand"]
+        self.right_hand = points["right_hand"]
+        self.left_shoulder = points["left_shoulder"]
+        self.right_shoulder = points["right_shoulder"]
+
+        self.hands = self.left_hand.midpoint(self.right_hand)
+        self.shoulder_mid = self.left_shoulder.midpoint(self.right_shoulder)
+        self.shoulder_dist = self.left_shoulder.dist(self.right_shoulder)
+        self.hand_dist = self.left_hand.dist(self.right_hand)
+        
+        # - Rotation Center ---
+        # How much to move it down by
+        HMTMIDB = self.shoulder_dist * 0.4
+
+        PERP = Point(
+            -(self.right_shoulder.y - self.left_shoulder.y),
+            self.right_shoulder.x - self.left_shoulder.x,
+        )
+        PERP_UNIT = PERP / PERP.length()
+
+        self.rotation_center = self.shoulder_mid + (PERP_UNIT * HMTMIDB)
+
+        # - Hands angle -------
+        HAND_VECTOR = self.hands - self.rotation_center
+        
+        SHOULDER_ANGLE = math.atan2(
+            self.right_shoulder.y - self.left_shoulder.y,
+            self.right_shoulder.x - self.left_shoulder.x,
+        )
+        
+        HAND_ANGLE = math.atan2(HAND_VECTOR.y, HAND_VECTOR.x)
+        
+        self.hands_angle = HAND_ANGLE - (SHOULDER_ANGLE)
+
+
+    def normalized(self) -> Self:
+        return type(self)({
+            "left_hand": (self.left_hand - self.rotation_center) / self.shoulder_dist,
+            "right_hand": (self.right_hand - self.rotation_center) / self.shoulder_dist,
+            "left_shoulder": (self.left_shoulder - self.rotation_center) / self.shoulder_dist,
+            "right_shoulder": (self.right_shoulder - self.rotation_center) / self.shoulder_dist,
+        })
+
+# - Game State -----------------------------------
+class State:
+    """The current state of the game"""
+    up_time: float
+    """Time in seconds since the game started"""
+    screen_dim: tuple[float,float]
+    """Screen/window width and height in pixels"""
+    overiding: bool
+    """True if a command is currently overriding the cursor"""
+    block_pause: bool
+    """True if the player cannot pause/unpause on their own"""
+    paused: bool
+    """True if the controller has paused the game"""
+    time_scale: float
+    """The game's time scale"""
+    menu_is_open: bool | None
+    """The game's own "menu is open" flag"""
+    focused: bool
+    """True if the game window is focused"""
+    run_in_background: bool
+    """True if the game keep running when not focused"""
+    cursor_pos: Point | None
+    """In-game cursor position, world units"""
+    cursor_screen: Point | None
+    """In-game cursor position, screen pixels"""
+    hammer_tip: Point | None
+    """Hammer tip position, world units"""
+    rotation_point: Point | None
+    """Centre of rotation (the hinge pivot), world units"""
+    hammer_extension: float | None
+    """Hammer extension (slider), world units"""
+    hinge_angle: float | None
+    """Hinge angle, degrees"""
+    object_pos: Point | None
+    """Position of the object carrying the hinge"""
+    object_rotation: float | None
+    """Rotation of the object carrying the hinge"""
+    cursor_rigidbody_pos: Point | None
+    """Cursor rigidbody position"""
+    cursor_rigidbody_vel: Point | None
+    """Cursor rigidbody velocity"""
+    cursor_target: Point | None
+    """The game's own cursor target"""
+    # method: Any
+    # """The currently selected `X` method"""
+    
+    def __init__(self, state: dict[str,Any]) -> None:
+        self.up_time = state["t"]
+        self.screen_dim = (state["sw"],state["sh"])
+        self.overiding = state["ov"]
+        self.block_pause = state["bp"]
+        self.paused = state["pz"]
+        self.pause_menu = state.get("pm")
+        self.time_scale = state["ts"]
+        self.menu_is_open = state.get("mp")
+        self.focused = state["fo"]
+        self.run_in_background = state["bg"]
+        self.cursor_pos = Point(state["fx"], state["fy"]) if state.get("fx") else None
+        self.cursor_screen = Point(state["mx"], state["my"]) if state.get("mx") else None
+        self.hammer_tip = Point(state["tx"], state["ty"]) if state.get("tx") else None
+        self.rotation_point = Point(state["cx"], state["cy"]) if state.get("cx") else None
+        self.hammer_extension = state.get("st")
+        self.hinge_angle = state.get("ha")
+        self.object_pos = Point(state["bx"], state["by"]) if state.get("bx") else None
+        self.object_rotation = state.get("br")
+        self.cursor_rigidbody_pos = Point(state["rx"], state["ry"]) if state.get("rx") else None
+        self.cursor_rigidbody_vel = Point(state["vx"], state["vy"]) if state.get("vx") else None
+        self.cursor_target = Point(state["wx"], state["wy"]) if state.get("wx") else None
+        # self.method = state["mt"]
+
+# - CodeCell -------------------------------------
+class CodeCell:
+    """The data recived from potential CodeCell"""
+    angle: float
+    """The angle relative to the direction of gravity in radians"""
+    charge: float
+    """Percentage charge of the CodeCell"""
+
+    def __init__(self, state: list[str]) -> None:
+        self.angle = float(state[0])
+        self.charge = float(state[1])
+
+# - Parameters -----------------------------------
+class Parameters:
+    """Common shared paramters"""
+    state: State | None = None
+    """The current game state"""
+    codecell: CodeCell | None
+    """The current state of the CodeCell if it is available"""
+    timer: float = time.time()
+    """Used for measuring time"""
+    last_valid: Points | None = None
+    """Last valid combination of body tracking markers"""
+    expected_handpos: Point | None = None
+    """The point where the game expects your hands to be located"""
+    use_codecell: bool = False
+    """The point where the game expects your hands to be located"""
+    
+    def __init__(self, para: dict[str,Any] = {}) -> None:
+        self.state = para.get("state")
+        self.timer = para.get("timer") or time.time()
+        self.last_valid = para.get("last_valid")
+        self.expected_handpos = para.get("expected_handpos")
+        self.use_codecell = para.get("use_codecell") or False
+
+para = Parameters()
+"""The globally shared parameters"""
+
+# --- Color ----------------------------------------------------------------
+def interpolate_color(color1: str, color2: str, factor: float) -> str:
+    """Interpolates between two hex colors."""
+    if factor < 0:
+        return color1
+    if factor > 1:
+        return color2
+
+    def parse_color(color: str) -> tuple[int, ...]:
+        color = color.lstrip("#")
+
+        if len(color) == 6:
+            return (255, *(int(color[i : i + 2], 16) for i in range(0, 6, 2)))
+
+        if len(color) == 8:
+            return tuple(int(color[i : i + 2], 16) for i in range(0, 8, 2))
+
+        raise ValueError(f"Invalid color format: {color}")
+
+    c1 = parse_color(color1)
+    c2 = parse_color(color2)
+
+    result = tuple(round(a + (b - a) * factor) for a, b in zip(c1, c2))
+
+    return "#" + "".join(f"{channel:02X}" for channel in result)
+
+# --- Overlay output -------------------------------------------------------
+# Commands are sent as JSON over UDP to the overlay instead of being drawn on the frame.
+OVERLAY_ADDR = ("127.0.0.1", int(os.environ.get("OVERLAY_PORT", "45454")))
+MIRROR = True  # the camera view is mirrored for the player
+# Note to self: pretty much none of the code has been tested with this set to False. I just noticied it now and I've realized that a lot of the math I've been struggling with might be because the math I did assumed plus is plus and minus is minus, which it isn't always when this is True.
+TTL_MS = 1000  # drawn items vanish by themselves if tracking stops sending updates after this time
+_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+
+
+def dot(id: str, p: Point, srW: int, srH: int, color: str, r: float = 0.006) -> dict[str,Any]:
+    x = p.x / srW
+    if MIRROR:
+        x = 1 - x
+    return {
+        "id": id,
+        "type": "circle",
+        "x": x,
+        "y": p.y / srH,
+        "r": r,
+        "width": 0,  # no outline, fill only
+        "fill": color,
+        "ttl": TTL_MS,
+    }
+
+
+def line(
+    id: str, p1: Point, p2: Point, srW: int, srH: int, color: str, width: float = 0.008
+) -> dict[str,Any]:
+    x1 = p1.x / srW
+    x2 = p2.x / srW
+    if MIRROR:
+        x1 = 1 - x1
+        x2 = 1 - x2
+    return {
+        "id": id,
+        "type": "line",
+        "x1": x1,
+        "y1": p1.y / srH,
+        "x2": x2,
+        "y2": p2.y / srH,
+        "width": width,
+        "color": color,
+        "ttl": TTL_MS,
+    }
+
+
+def arrow(
+    id: str, start: Point, end: Point, srW: int, srH: int, color: str, width: float = 0.008
+) -> dict[str,Any]:
+    x1 = start.x / srW
+    x2 = end.x / srW
+    if MIRROR:
+        x1 = 1 - x1
+        x2 = 1 - x2
+    return {
+        "id": id,
+        "type": "line",
+        "x1": x1,
+        "y1": start.y / srH,
+        "x2": x2,
+        "y2": end.y / srH,
+        "width": width,
+        "color": color,
+        "arrow": True,
+        "ttl": TTL_MS,
+    }
+
+
+def text(
+    id: str,
+    t: str,
+    achor: Point,
+    srW: int,
+    srH: int,
+    color: str,
+    size: float = 0.01,
+    align: str = "center",
+    bg_color: str = "#00000000",
+    bold: bool = False,
+) -> dict[str,Any]:
+    x = achor.x / srW
+    if MIRROR:
+        x = 1 - x
+    return {
+        "id": id,
+        "type": "text",
+        "text": t,
+        "x": x,
+        "y": achor.y / srH,
+        "color": color,
+        "size": size,
+        "align": align,
+        "bg": bg_color,
+        "bold": bold,
+        "ttl": TTL_MS,
+    }
+
+
+def command(cmd: str, input: dict = {}) -> dict[str,Any]:
+    input["cmd"] = cmd
+    return input
+
+
+def json_command(cmd: dict[str,Any] | list[dict[str,Any]] = {}) -> str:
+    if isinstance(cmd, dict):
+        return json.dumps(cmd, separators=(",", ":"))
+    return "\n".join(json.dumps(ting, separators=(",", ":")) for ting in cmd)
+
+
+def overlay(commands: list[dict[str,Any]]) -> None:
+    if commands:
+        _sock.sendto(json_command(commands).encode() + b"\n", OVERLAY_ADDR)
+
+
+# --- Camera ---------------------------------------------------------------
+def validate_camera(index: int) -> bool:
+    cap = cv2.VideoCapture(index)
+    try:
+        return cap.isOpened()
+    finally:
+        cap.release()
 
 
 def get_camera_index() -> int:
-    def validate_camera(index: int) -> bool:
-        cap = cv2.VideoCapture(index)
-        try:
-            return cap.isOpened()
-        finally:
-            cap.release()
-
     while True:
         print("Hvilket kamera index vil du gerne bruge?")
         try:
@@ -107,209 +450,936 @@ def get_camera_index() -> int:
         print("Det kamera eksisterer ikke")
 
 
+# --- Find Points ----------------------------------------------------------
+def findPoints(
+    frame: cv2.typing.MatLike,
+    detector: Any = vision.PoseLandmarker.create_from_options(options),
+) -> Points | None:
+    """Returns the position of relevant body markers from skeleton tracking"""
+    h, w, _ = frame.shape
+
+    rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+    mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb_frame)
+
+    timestamp_ms = int((cv2.getTickCount() / cv2.getTickFrequency()) * 1000)
+
+    detection_result = detector.detect_for_video(mp_image, timestamp_ms)
+
+    if detection_result.pose_landmarks:
+        for pose_landmarks in detection_result.pose_landmarks:
+            left_hand = average_point(
+                [
+                    Point.from_landmark(pose_landmarks[15]),
+                    Point.from_landmark(pose_landmarks[17]),
+                    Point.from_landmark(pose_landmarks[19]),
+                ]
+            ).correct(w, h)
+            right_hand = average_point(
+                [
+                    Point.from_landmark(pose_landmarks[16]),
+                    Point.from_landmark(pose_landmarks[18]),
+                    Point.from_landmark(pose_landmarks[20]),
+                ]
+            ).correct(w, h)
+
+            left_shoulder = Point.from_landmark(pose_landmarks[12]).correct(w, h)
+            right_shoulder = Point.from_landmark(pose_landmarks[11]).correct(w, h)
+
+            # body = average_point(
+            #     [
+            #         Point.from_landmark(pose_landmarks[11]),
+            #         Point.from_landmark(pose_landmarks[12]),
+            #         Point.from_landmark(pose_landmarks[23]),
+            #         Point.from_landmark(pose_landmarks[24]),
+            #     ]
+            # ).correct(w, h)
+
+            return Points({
+                "left_hand": left_hand,
+                "right_hand": right_hand,
+                "left_shoulder": left_shoulder,
+                "right_shoulder": right_shoulder,
+                # "body": body,
+            })
+
+
+# --- Overlay construction -------------------------------------------------
+def collect_errors(points: Points, last_valid: Points | None, w: int, h: int, max_arm=2.2) -> list[str]:
+    errors: list[str] = []
+
+    if not points.left_hand.inside_bounds(0, 0, w, h) or not points.right_hand.inside_bounds(0, 0, w, h):
+        errors.append("hands_outside")
+    if not points.left_shoulder.inside_bounds(0, 0, w, h) or not points.right_shoulder.inside_bounds(0, 0, w, h):
+        errors.append("shoulders_outside")
+    shoulder_dist = points.left_shoulder.dist(points.right_shoulder)
+    MAX_ARM = shoulder_dist * max_arm
+    if not points.left_shoulder.inside_bounds(
+        MAX_ARM, MAX_ARM, w - MAX_ARM, h - MAX_ARM
+    ) or not points.right_shoulder.inside_bounds(
+        MAX_ARM, MAX_ARM, w - MAX_ARM, h - MAX_ARM
+    ):
+        if shoulder_dist + MAX_ARM * 2 > w:
+            errors.append("too_close")
+        else:
+            errors.append("not_middle")
+    hand_dist = points.left_hand.dist(points.right_hand)
+    if hand_dist > shoulder_dist:
+        errors.append("hands_together")
+    if last_valid and points.normalized().hands.dist(last_valid.normalized().hands) > THRESHOLD_DIST:
+        errors.append("hands_wrong")
+
+    return errors
+
+
+def display_errors(
+    errors: list[str], points: Points, w: int, h: int
+) -> list[dict[str,Any]]:
+    items: list[dict[str,Any]] = []
+
+    offset = 0.01
+    SIZE = 0.04
+    if "too_close" in errors:
+        items.append(
+            text(
+                "too_close",
+                "Du står for tæt på kameraet",
+                Point(w / 2, offset * h),
+                w,
+                h,
+                "#FFFFFF",
+                SIZE,
+                "center",
+                "#20990000",
+            )
+        )
+        offset += SIZE * 1.5
+    if "not_middle" in errors:
+        items.append(
+            text(
+                "not_middle",
+                "Du står for ikke i centrum",
+                Point(w / 2, offset * h),
+                w,
+                h,
+                "#FFFFFF",
+                SIZE,
+                "center",
+                "#20990000",
+            )
+        )
+        offset += SIZE * 1.5
+    if "hands_outside" in errors:
+        items.append(
+            text(
+                "hands_outside",
+                "Dine hænder skal være inden for billedet",
+                Point(w / 2, offset * h),
+                w,
+                h,
+                "#FFFFFF",
+                SIZE,
+                "center",
+                "#20990000",
+            )
+        )
+        offset += SIZE * 1.5
+    if "shoulders_outside" in errors:
+        items.append(
+            text(
+                "shoulders_outside",
+                "Dine skuldre skal være inden for billedet",
+                Point(w / 2, offset * h),
+                w,
+                h,
+                "#FFFFFF",
+                SIZE,
+                "center",
+                "#20990000",
+            )
+        )
+        offset += SIZE * 1.5
+    if "hands_together" in errors:
+        items.append(
+            text(
+                "hands_together",
+                "Dine hænder må ikke være mere end 1 skuldrelængde fra hinanden",
+                Point(w / 2, offset * h),
+                w,
+                h,
+                "#FFFFFF",
+                SIZE,
+                "center",
+                "#20990000",
+            )
+        )
+        items.append(dot("right_hand", points.right_hand, w, h, "#ff0000", r=0.01))
+        items.append(dot("left_hand", points.left_hand, w, h, "#ff0000", r=0.01))
+        offset += SIZE * 1.5
+    elif "hands_wrong" in errors and para.last_valid:
+        items.append(
+            text(
+                "hands_wrong",
+                "Dine hænder skal matche der hvor de var, før du pausede",
+                Point(w / 2, offset * h),
+                w,
+                h,
+                "#FFFFFF",
+                SIZE,
+                "center",
+                "#20990000",
+            )
+        )
+        items.append(arrow("hand_dist", points.hands, para.last_valid.hands - para.last_valid.rotation_center + points.rotation_center, w, h, interpolate_color("#00FF00", "#FF0000", points.normalized().hands.dist(para.last_valid.normalized().hands) * 2)))
+        offset += SIZE * 1.5
+
+    return items
+
+
+def construct(points: Points, mode: str, w: int, h: int) -> list[dict[str,Any]]:
+    items: list[dict[str,Any]] = []
+
+    # - Setup ---------------------
+    if mode == "setup":
+        items.append(
+            text(
+                "top_text",
+                "Setup",
+                Point(w / 2, 0),
+                w,
+                h,
+                "#FFFFFF",
+                bg_color="#71000000",
+                size=0.05,
+                bold=True,
+            )
+        )
+        errors = collect_errors(points, None, w, h, max_arm=2.3)
+        if not para.state:
+            items.append(
+                text(
+                    "helper",
+                    "Du er ikke inden i spillet\nEller du har ikke installeret pluginet",
+                    Point(w / 2, h / 2 - 0.035 * h),
+                    w,
+                    h,
+                    "#FFFFFF",
+                    0.07,
+                    "center",
+                    "#20800000",
+                )
+            )
+        elif not para.state.rotation_point:
+            items.append(
+                text(
+                    "helper",
+                    "Du er i menuen\nDu skal gå ind i et spil",
+                    Point(w / 2, h / 2 - 0.035 * h),
+                    w,
+                    h,
+                    "#FFFFFF",
+                    0.07,
+                    "center",
+                    "#20800000",
+                )
+            )
+        elif "shoulders_outside" in errors:
+            items.append(
+                text(
+                    "helper",
+                    "Du er ikke tilstrækeligt synlig for kameraet",
+                    Point(w / 2, h / 2 - 0.035 * h),
+                    w,
+                    h,
+                    "#FFFFFF",
+                    0.07,
+                    "center",
+                    "#20800000",
+                )
+            )
+        elif "too_close" in errors:
+            items.append(
+                text(
+                    "helper",
+                    "Du står for tæt på kameraet",
+                    Point(w / 2, h / 2 - 0.035 * h),
+                    w,
+                    h,
+                    "#FFFFFF",
+                    0.07,
+                    "center",
+                    "#20800000",
+                )
+            )
+        elif "not_middle" in errors:
+            items.append(
+                text(
+                    "helper",
+                    "Du bør stille dig nærmere midten for kameraet",
+                    Point(w / 2, h / 2 - 0.035 * h),
+                    w,
+                    h,
+                    "#FFFFFF",
+                    0.07,
+                    "center",
+                    "#20800000",
+                )
+            )
+        elif "hands_together" in errors or "hands_outside" in errors:
+            items.append(
+                text(
+                    "helper",
+                    "Dine hænder skal være inden for\nén skulder længde af hinanden",
+                    Point(w / 2, h / 2 - 0.035 * h),
+                    w,
+                    h,
+                    "#FFFFFF",
+                    0.07,
+                    "center",
+                    "#20800000",
+                )
+            )
+        elif para.state and para.state.hammer_tip and para.state.rotation_point:
+            shoulder_dist = points.left_shoulder.dist(points.right_shoulder)
+            exp_hands = get_expected_handposition(para.state.hammer_tip, para.state.rotation_point) * GAME_UNIT_TO_SHOULDER_DIST * shoulder_dist + points.rotation_center
+            dist = points.hands.dist(exp_hands) / shoulder_dist
+            color = interpolate_color("#00FF00", "#FF0000", dist)
+            if (dist > THRESHOLD_DIST):
+                items.append(
+                    text(
+                        "helper",
+                        "Dine hænder skal være tæt på\nden aktuelle position\ni spillet",
+                        Point(w / 2, h / 2 - 0.035 * h),
+                        w,
+                        h,
+                        "#FFFFFF",
+                        0.07,
+                        "center",
+                        "#20800000",
+                    )
+                )
+            
+                arrow_offset = (exp_hands - points.hands)
+                arrow_offset = arrow_offset / arrow_offset.length() * (dist * shoulder_dist - 10)
+                items.append(arrow("hands_arrow", points.hands, points.hands + arrow_offset, w, h, color[:1] + '80' + color[3:], 0.006))
+            
+            # This could be replaced by a "circle" function instead of two dots, it would then have an outline paramter and a fill paramter.
+            items.append(dot("expected_hands_outline", exp_hands, w, h, "#000000", 0.019))
+            items.append(dot("expected_hands", exp_hands, w, h, color, 0.015))
+            items.append(dot("hands", points.hands, w, h, color))
+        return items
+    # - Playing -------------------
+    if mode == "playing":
+        items.append(
+            text(
+                "top_text",
+                "Playing",
+                Point(w / 2, 0),
+                w,
+                h,
+                "#FFFFFF",
+                bg_color="#71000000",
+                size=0.04,
+                bold=True,
+            )
+        )
+        return items
+
+    # - Any -----------------------
+    items.append(
+        line("shoulders", points.left_shoulder, points.right_shoulder, w, h, "#B0310874")
+    )
+    items.append(dot("shoulder1", points.left_shoulder, w, h, "#3b2fdd"))
+    items.append(dot("shoulder2", points.right_shoulder, w, h, "#3b2fdd"))
+
+    items.append(dot("rot_cen", points.rotation_center, w, h, "#ffffff"))
+
+    items.append(
+        dot(
+            "mid_hands",
+            points.hands,
+            w,
+            h,
+            interpolate_color("#00FF00", "#FF0000", points.hand_dist / points.shoulder_dist),
+        )
+    )
+
+    return items
+
+
+# --- Handling Game Interaction --------------------------------------------
+rx_game = socket.socket(socket.AF_INET, socket.SOCK_DGRAM); rx_game.bind(("127.0.0.1", 9877)); rx_game.settimeout(5)
+tx = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+
+def send_game(msg: str):
+    tx.sendto(msg.encode(), ("127.0.0.1", 9876))
+    return
+
+def game_state(time_out: float = 500) -> State | None:
+    """Return the NEWEST packet: block for one, then drain everything queued behind it.
+    If nothing arrives, it returns None."""
+    time_out /= 1000
+    while True:
+        rx_game.settimeout(time_out)
+        try:
+            last: dict = json.loads(rx_game.recv(65536)); break
+        except socket.timeout:
+            return None
+    rx_game.setblocking(False)
+    try:
+        while True: last: dict = json.loads(rx_game.recv(65536))
+    except BlockingIOError:
+        pass
+    rx_game.settimeout(5)
+    if last.get("fo") is False and not last.get("bg", False):
+        print("[game window unfocused and runInBackground is off - it may stall]", flush=True)
+    return State(last)
+
+def prevent_player_pause(state: State | None = None):
+    """Prevents the player from pausing or unpausing the game themselfs"""
+    if not state or state.block_pause == False:
+        send_game("set block_pause 1")
+    return
+
+
+def pause(state: State | None = None):
+    """Pauses the game without the pause menu"""
+    if not state or state.paused == False:
+        send_game("pause 1")
+    return
+
+
+def unpause(state: State | None = None):
+    """Unpauses the game if there is no pause menu"""
+    if not state or state.paused == True:
+        send_game("pause 0")
+    return
+
+
+def pause_menu(state: State | None = None):
+    """Pauses the game with the pause menu"""
+    if not state or state.pause_menu == False:
+        send_game("pause_menu 1")
+    return
+
+
+def unpause_menu(state: State | None = None):
+    """Unpauses the game from the pause menu"""
+    if not state or state.pause_menu == True:
+        send_game("pause_menu 0")
+    return
+
+
+def place_hammer(ang: float, ext: float):
+    """Put the hammer at an angle (degrees, 0 = pointing right, counter-clockwise) and a distance from the hinge pivot (in world units and degrees)."""
+    send_game(f"H {ang} {max(1, ext)}")
+    return
+
+
+def release_player(state: State | None = None):
+    """Stop overriding. The game's own mouse input takes over again."""
+    if not state or state.overiding == True:
+        send_game("off")
+    if not state or state.block_pause == True:
+        send_game("set block_pause 0")
+    unpause(state)
+    pause_menu(state)
+    return
+
+
+def get_expected_handposition(rotation_point: Point, hammer_tip: Point) -> Point:
+    """Gets where the hands should be located relative to the center based on how the in-game player is positioned"""
+    hammer = hammer_tip - rotation_point
+    ang = math.atan2(hammer.x, hammer.y)
+    return hammer - (Point(math.sin(ang), math.cos(ang)) * HAMMER_LENGTH_GAME_UNIT)
+
+
+# --- CodeCell -------------------------------------------------------------
+rx_codecell = socket.socket(socket.AF_INET, socket.SOCK_DGRAM); rx_codecell.bind(("0.0.0.0", 4210)); rx_codecell.settimeout(5)
+
+def codecell(time_out: float = 250) -> CodeCell | None:
+    """Return the NEWEST packet: block for one, then drain everything queued behind it.
+    If nothing arrives, it returns None."""
+    time_out /= 1000
+    while True:
+        rx_codecell.settimeout(time_out)
+        try:
+            last = rx_codecell.recvfrom(256)[0].decode('utf-8').strip().split(','); break
+        except socket.timeout:
+            return None
+    rx_codecell.setblocking(False)
+    try:
+        while True: last = rx_codecell.recvfrom(256)[0].decode('utf-8').strip().split(',')
+    except BlockingIOError:
+        pass
+    rx_codecell.settimeout(5)
+    
+    return CodeCell(last)
+
+
+CODECELL_DEAD_ZONE = math.radians(15)
+"""Within this angle of horizontal, the CodeCell can't tell the two hammer directions apart"""
+
+
+def _wrap(a: float) -> float:
+    """Wraps an angle in radians to [-pi, pi)"""
+    return (a + math.pi) % math.tau - math.pi
+
+
+def _sign(x: float) -> int:
+    return (x > 0) - (x < 0)
+
+
+def _clamp(x: float, lo: float, hi: float) -> float:
+    return max(lo, min(hi, x))
+
+
+class HammerTracker:
+    """Decides which end of the hammer is the tip.
+
+    The hands (relative to the rotation center) only give the hammer *line*; the tip is at
+    `hands_angle + k*pi`. k = 0 is the old `hammer_inward == True` (tip angle == hands_angle),
+    k = 1 is the old `hammer_inward == False`.
+
+    Per frame:
+      1. The hand vector (shoulder lengths, relative to the rotation center) is despiked and
+         smoothed with a One Euro filter.
+      2. A dead zone around the pivot with hysteresis (`dead_in` / `dead_out`) decides whether
+         the hand angle can be trusted at all.
+      3. Outside it, k is kept unless the other candidate is clearly nearer the predicted tip
+         angle for `switch_frames` frames in a row (anything else is a glitch). While such a
+         switch is pending the tip is held still.
+      4. Inside it, the tip coasts (angular velocity decaying). On exit the candidate nearest the
+         coasted tip wins: a straight pass flips k and keeps the tip, a bounce-back keeps k.
+         Near ties are broken by which way the hand swept around the pivot.
+      5. The CodeCell votes into a leaky accumulator; only persistent disagreement flips the tip.
+      6. The output is slew-limited to `max_rate` rad/s.
+    """
+
+    MIN_DT = 1 / 240
+    MAX_DT = 0.2
+
+    def __init__(
+        self,
+        *,
+        dead_in: float = 0.12,
+        dead_out: float = 0.20,
+        min_cutoff: float = 1.2,
+        beta: float = 6.0,
+        d_cutoff: float = 1.0,
+        max_hand_speed: float = 10.0,
+        jump_margin: float = 0.15,
+        max_rejects: int = 3,
+        omega_decay: float = 0.08,
+        switch_margin: float = 0.8,
+        switch_frames: int = 3,
+        tie_margin: float = 0.5,
+        sensor_dead_zone: float = CODECELL_DEAD_ZONE,
+        sensor_tau: float = 0.6,
+        sensor_flip: float = 0.2,
+        sensor_max_omega: float = 6.0,
+        max_rate: float = 20.0,
+        initial_inward: bool = False,
+    ) -> None:
+        self.dead_in = dead_in
+        """Enter the dead zone when the hand is closer than this to the pivot (shoulder lengths)"""
+        self.dead_out = dead_out
+        """Leave the dead zone when the hand is further than this from the pivot (shoulder lengths)"""
+        self.min_cutoff = min_cutoff
+        """One Euro: cutoff in Hz when the hand is still. Lower = smoother but laggier"""
+        self.beta = beta
+        """One Euro: how quickly the cutoff opens up with hand speed"""
+        self.d_cutoff = d_cutoff
+        """One Euro: cutoff in Hz of the speed estimate"""
+        self.max_hand_speed = max_hand_speed
+        """Fastest believable hand speed in shoulder lengths per second; faster jumps are glitches"""
+        self.jump_margin = jump_margin
+        """Extra slack in shoulder lengths on top of `max_hand_speed` before a sample is a glitch"""
+        self.max_rejects = max_rejects
+        """A 'glitch' that persists this many frames is accepted as real"""
+        self.omega_decay = omega_decay
+        """Time constant in seconds with which the coasting angular velocity dies out"""
+        self.switch_margin = switch_margin
+        """Radians the current candidate must be further from the predicted tip than the other"""
+        self.switch_frames = switch_frames
+        """Frames the other candidate must stay clearly nearer before it is accepted"""
+        self.tie_margin = tie_margin
+        """If both candidates are this close to equally far from the coasted tip, use the sweep direction"""
+        self.sensor_dead_zone = sensor_dead_zone
+        """Radians from horizontal within which the CodeCell (or the tip) is ignored as a vote"""
+        self.sensor_tau = sensor_tau
+        """Leak time constant in seconds of the CodeCell vote accumulator"""
+        self.sensor_flip = sensor_flip
+        """Accumulated disagreement (full-strength seconds) needed to flip the tip"""
+        self.sensor_max_omega = sensor_max_omega
+        """CodeCell votes are ignored while the tip turns faster than this (rad/s); accelerations fool the sensor"""
+        self.max_rate = max_rate
+        """Fastest the commanded angle may turn, rad/s"""
+        self.initial_inward = initial_inward
+        """The branch to start with when the game can't tell us"""
+
+        self.hand_angle: float = 0.0
+        """Smoothed hand angle in radians (same frame as `Points.hands_angle`)"""
+        self.hand_radius: float = 0.0
+        """Smoothed hand distance from the pivot in shoulder lengths"""
+        self.reset()
+
+    # - Public ---------------------------------------
+    @property
+    def inward(self) -> bool:
+        """True while the tip angle equals the hand angle (the old `para.hammer_inward`)"""
+        return self._k == 0
+
+    @property
+    def in_dead_zone(self) -> bool:
+        return self._dead
+
+    def reset(self) -> None:
+        """Forget everything. The next `update` starts from scratch"""
+        self._t: float | None = None
+        self._raw: tuple[float, float] | None = None
+        self._pos: tuple[float, float] | None = None
+        self._vel = (0.0, 0.0)
+        self._rejects = 0
+        self._k = 0 if self.initial_inward else 1
+        self._phi = 0.0
+        self._out = 0.0
+        self._omega = 0.0
+        self._dead = False
+        self._last_out: tuple[tuple[float, float], tuple[float, float]] | None = None
+        self._pending = 0
+        self._acc = 0.0
+        self._sync: float | None = None
+
+    def resync(self, tip: Point | None = None, pivot: Point | None = None) -> None:
+        """Restart from the in-game pose (world units). Without it, starts from `initial_inward`.
+        The tip angle is taken as atan2 in world space, 0 = right, counter-clockwise,
+        the same convention as `place_hammer`."""
+        self.reset()
+        if tip is not None and pivot is not None:
+            self._sync = math.atan2(tip.y - pivot.y, tip.x - pivot.x)
+
+    def update(
+        self,
+        hands_angle: float,
+        radius: float,
+        codecell_angle: float | None = None,
+        now: float | None = None,
+    ) -> float:
+        """Angle in degrees for `place_hammer` (0 = right, counter-clockwise).
+        
+        `hands_angle`: `Points.hands_angle` in radians.
+        
+        `radius`: distance from rotation center to the hands in shoulder lengths.
+        
+        `codecell_angle`: `CodeCell.angle` in radians (0 = up, pi = down) or None.
+        """
+        now = time.perf_counter() if now is None else now
+        raw = (radius * math.cos(hands_angle), radius * math.sin(hands_angle))
+
+        if self._pos is None or self._raw is None or self._t is None:
+            self._seed(raw, now)
+            return math.degrees(self._out)
+
+        dt = _clamp(now - self._t, self.MIN_DT, self.MAX_DT)
+        self._t = now
+
+        # Despike + smooth
+        jump = math.hypot(raw[0] - self._raw[0], raw[1] - self._raw[1])
+        limit = self.max_hand_speed * dt * (self._rejects + 1) + self.jump_margin
+        if jump > limit and self._rejects < self.max_rejects:
+            self._rejects += 1  # glitch: keep the previous smoothed position
+        else:
+            if jump > limit:  # it persisted, so it's real don't glide there slowly
+                self._pos, self._vel = raw, (0.0, 0.0)
+            else:
+                self._one_euro(raw, dt)
+            self._raw = raw
+            self._rejects = 0
+
+        x, y = self._pos
+        r, theta = math.hypot(x, y), math.atan2(y, x)
+        self.hand_angle, self.hand_radius = theta, r
+
+        # Dead zone with hysteresis
+        just_exited = False
+        if not self._dead and r < self.dead_in:
+            self._dead = True
+        elif self._dead and r > self.dead_out:
+            self._dead = False
+            just_exited = True
+            self._resolve_exit(theta)
+
+        # Track or coast
+        if self._dead:
+            self._omega *= math.exp(-dt / self.omega_decay)
+            self._phi = _wrap(self._phi + self._omega * dt)
+        else:
+            if not just_exited:
+                self._track(theta, dt)
+            self._last_out = (self._pos, self._vel)
+
+        # CodeCell
+        if codecell_angle is not None:
+            self._vote(codecell_angle, dt)
+
+        # Slew limit
+        step = self.max_rate * dt
+        self._out = _wrap(self._out + _clamp(_wrap(self._phi - self._out), -step, step))
+        return math.degrees(self._out)
+
+    # - Internals ------------------------------------
+    def _seed(self, raw: tuple[float, float], now: float) -> None:
+        self._t, self._raw, self._pos, self._vel = now, raw, raw, (0.0, 0.0)
+        r, theta = math.hypot(*raw), math.atan2(raw[1], raw[0])
+        self.hand_angle, self.hand_radius = theta, r
+        if self._sync is not None:
+            self._phi = self._sync
+            near0 = abs(_wrap(theta - self._phi))
+            near1 = abs(_wrap(theta + math.pi - self._phi))
+            self._k = 0 if near0 <= near1 else 1
+            self._sync = None
+        else:
+            self._phi = _wrap(theta + self._k * math.pi)
+        self._out = self._phi
+        self._dead = r < self.dead_in
+        if not self._dead:
+            self._last_out = (self._pos, self._vel)
+
+    @staticmethod
+    def _alpha(dt: float, cutoff: float) -> float:
+        tau = 1 / (math.tau * cutoff)
+        return 1 / (1 + tau / dt)
+
+    def _one_euro(self, raw: tuple[float, float], dt: float) -> None:
+        assert self._raw is not None and self._pos is not None
+        vx = (raw[0] - self._raw[0]) / dt
+        vy = (raw[1] - self._raw[1]) / dt
+        ad = self._alpha(dt, self.d_cutoff)
+        self._vel = (
+            self._vel[0] + ad * (vx - self._vel[0]),
+            self._vel[1] + ad * (vy - self._vel[1]),
+        )
+        a = self._alpha(dt, self.min_cutoff + self.beta * math.hypot(*self._vel))
+        self._pos = (
+            self._pos[0] + a * (raw[0] - self._pos[0]),
+            self._pos[1] + a * (raw[1] - self._pos[1]),
+        )
+
+    def _track(self, theta: float, dt: float) -> None:
+        """Outside the dead zone: stay on the current branch unless the evidence is clear"""
+        cands = (theta, theta + math.pi)
+        pred = self._phi + _clamp(self._omega * dt, -0.5, 0.5)
+        d = (abs(_wrap(cands[0] - pred)), abs(_wrap(cands[1] - pred)))
+        best = 0 if d[0] <= d[1] else 1
+
+        if best != self._k and d[self._k] - d[best] > self.switch_margin:
+            self._pending += 1
+        else:
+            self._pending = 0
+
+        if self._pending >= self.switch_frames:
+            self._k, self._pending, self._omega = best, 0, 0.0
+            self._phi = _wrap(cands[best])
+        elif self._pending:  # disputed: hold still instead of whipping the hammer around
+            self._omega *= math.exp(-dt / self.omega_decay)
+            self._phi = _wrap(pred)
+        else:
+            target = cands[self._k]
+            measured = _wrap(target - self._phi) / dt
+            self._omega = _clamp(
+                self._omega + 0.5 * (measured - self._omega), -self.max_rate, self.max_rate
+            )
+            self._phi = _wrap(target)
+
+    def _resolve_exit(self, theta: float) -> None:
+        """Leaving the dead zone: pick the candidate nearest the coasted tip"""
+        cands = (theta, theta + math.pi)
+        off = (_wrap(cands[0] - self._phi), _wrap(cands[1] - self._phi))
+        k = 0 if abs(off[0]) <= abs(off[1]) else 1
+
+        if abs(abs(off[0]) - abs(off[1])) < self.tie_margin and self._last_out and off[0]:
+            # Roughly a 90° corner. Turn the tip the way the hand swept around the pivot.
+            s = self._sweep_sign()
+            if s:
+                k = 0 if _sign(off[0]) == s else 1
+
+        self._k, self._pending, self._omega = k, 0, 0.0
+        self._phi = _wrap(cands[k])
+
+    def _sweep_sign(self) -> int:
+        """+1 if the hand passed the pivot counter-clockwise (angle increasing), -1 if clockwise"""
+        assert self._last_out is not None and self._pos is not None
+        (px, py), (vx, vy) = self._last_out
+        if math.hypot(vx, vy) >= 0.5:  # direction of travel is trustworthy: use the line
+            return _sign(px * vy - py * vx)
+        return _sign(px * self._pos[1] - py * self._pos[0])  # else the entry -> exit chord
+
+    def _vote(self, codecell_angle: float, dt: float) -> None:
+        """The CodeCell says whether the tip is up or down. Persistent disagreement flips the tip."""
+        self._acc *= math.exp(-dt / self.sensor_tau)
+        lim = math.sin(self.sensor_dead_zone)
+        tip_up = math.sin(self._phi)  # >0: we currently claim the tip points up
+        cell_up = math.cos(codecell_angle)  # >0: the CodeCell says it points up
+        if abs(self._omega) < self.sensor_max_omega and abs(tip_up) > lim and abs(cell_up) > lim:
+            self._acc -= tip_up * cell_up * dt  # strength = how far from horizontal both are
+        cap = self.sensor_flip * 1.25
+        self._acc = _clamp(self._acc, -cap, cap)
+        if self._acc > self.sensor_flip:
+            self._phi = _wrap(self._phi + math.pi)
+            self._k ^= 1
+            self._pending, self._omega = 0, 0.0
+            self._acc = -self.sensor_flip  # needs a full swing back to flip again (hysteresis)
+
+
+hammer_tracker = HammerTracker()
+"""Decides which end of the hammer is the tip"""
+
+
+# --- Main -----------------------------------------------------------------
+def update(
+    points: Points, mode: str, w: int, h: int
+) -> str:
+    errors = collect_errors(points, para.last_valid, w, h)
+    para.state = game_state()
+    para.codecell = codecell() if para.use_codecell else None
+    prevent_player_pause(para.state)
+    unpause_menu(para.state)
+    
+    match mode:
+        case "setup":
+            if para.state and para.state.rotation_point:
+                pause(para.state)
+            # unpause(para.state)
+            items = construct(points, mode, w, h)
+            
+            if not any(item.get("id") == "helper" for item in items):
+                items.append(
+                    text(
+                        "helper",
+                        f" {(5 + para.timer - time.time()):.1f} ",
+                        Point(w / 2, h / 2 - 0.035 * h),
+                        w,
+                        h,
+                        "#FFFFFF",
+                        0.07,
+                        "center",
+                        "#2000FF00",
+                    )
+                )
+                if 5 + para.timer - time.time() <= 0.05:
+                    para.last_valid = points
+                    hammer_tracker.resync(
+                        para.state.hammer_tip if para.state else None,
+                        para.state.rotation_point if para.state else None,
+                    )
+                    mode = "playing"
+            else:
+                para.timer = time.time()
+            overlay([command("clear"), command("batch", {"items": items})])
+        case "playing":
+            if len(errors) > 1 or (len(errors) == 1 and errors[0] != "hands_wrong"):
+                for error in errors:
+                    if error != "hands_wrong":
+                        print("Error: " + error)
+                mode = "fixing"
+                pause(para.state)
+            else:
+                unpause(para.state)
+                overlay(
+                    [
+                        command("clear"),
+                        command("batch", {"items": construct(points, mode, w, h)}),
+                    ]
+                )
+                ANGLE = hammer_tracker.update(
+                    points.hands_angle,
+                    (points.hands - points.rotation_center).length() / points.shoulder_dist,
+                    para.codecell.angle if para.codecell else None,
+                )
+                # Use the smoothed hand vector so angle and extension agree with each other
+                HANDS_DIST = hammer_tracker.hand_radius * SHOULDER_DIST_TO_GAME_UNIT
+                # Inward: ANGLE == hands_angle, so cos = 1 and EXTENSION = L - r
+                # Outward: ANGLE == hands_angle + 180, so cos = -1 and EXTENSION = L + r
+                EXTENSION = HAMMER_LENGTH_GAME_UNIT - HANDS_DIST * math.cos(hammer_tracker.hand_angle - math.radians(ANGLE))
+                place_hammer(ANGLE, EXTENSION)
+        case "fixing":
+            overlay(
+                [
+                    command("clear"),
+                    command(
+                        "batch",
+                        {
+                            "items": construct(points, mode, w, h)
+                            + display_errors(errors, points, w, h)
+                        },
+                    ),
+                ]
+            )
+            if len(errors) == 0:
+                unpause(para.state)
+                hammer_tracker.resync(
+                    para.state.hammer_tip if para.state else None,
+                    para.state.rotation_point if para.state else None,
+                )
+                mode = "playing"
+        case "_":
+            raise ValueError(f"{mode} is not a valid mode")
+
+    if mode == "playing":
+        para.last_valid = points
+
+    return mode
+
+
 def main() -> None:
-    cam_index = get_camera_index()
+    # Optains Camera
+    if "CAMERA" in os.environ:
+        try:
+            camera_env = os.environ.get("CAMERA")
+            assert camera_env is not None
+            cam_index = int(camera_env)
+            if not validate_camera(cam_index):
+                print("Det er IKKE et rigtigt kamera!")
+                return
+        except ValueError:
+            print("CAMERA er ikke et rigtigt tal!")
+            return
+    else:
+        cam_index = get_camera_index()
 
-    detector = vision.PoseLandmarker.create_from_options(options)
-
+    # Optains frame
     cap = cv2.VideoCapture(cam_index)
+    ret, frame = cap.read()
+    if not ret:
+        return
+    h, w, _ = frame.shape
 
-    while cap.isOpened():
-        ret, frame = cap.read()
-        if not ret:
-            break
+    mode = "setup"
 
-        rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb_frame)
+    if codecell():
+        para.use_codecell = True
+        print("Bruger CodeCell til at korrigere vinkler.")
 
-        timestamp_ms = int((cv2.getTickCount() / cv2.getTickFrequency()) * 1000)
+    # Main Loop
+    try:
+        while cap.isOpened():
+            # Optains Points from frame
+            ret, frame = cap.read()
+            if not ret:
+                continue
+            points = findPoints(frame)
+            if not points:
+                continue
 
-        detection_result = detector.detect_for_video(mp_image, timestamp_ms)
-
-        h, w, _ = frame.shape
-
-        if detection_result.pose_landmarks:
-            for pose_landmarks in detection_result.pose_landmarks:
-                if "DEBUG" in os.environ and os.environ.get("DEBUG") == "true":
-                    for landmark in pose_landmarks:
-                        cx, cy = int(landmark.x * w), int(landmark.y * h)
-
-                        cv2.circle(frame, (cx, cy), 5, (255, 0, 0), cv2.FILLED)
-
-                left = average_hand(
-                    Point.from_landmark(pose_landmarks[15]).correct(w, h),
-                    Point.from_landmark(pose_landmarks[17]).correct(w, h),
-                    Point.from_landmark(pose_landmarks[19]).correct(w, h),
-                )
-                right = average_hand(
-                    Point.from_landmark(pose_landmarks[16]).correct(w, h),
-                    Point.from_landmark(pose_landmarks[18]).correct(w, h),
-                    Point.from_landmark(pose_landmarks[20]).correct(w, h),
-                )
-
-                if (
-                    left.x < 0
-                    or left.x > w
-                    or left.y < 0
-                    or left.y > h
-                    or right.x < 0
-                    or right.x > w
-                    or right.y < 0
-                    or right.y > h
-                ):
-                    frame = cv2.flip(frame, 1)
-                    cv2.putText(
-                        frame,
-                        "Dine hænder skal være inden for billedet",
-                        (100, 100),
-                        cv2.FONT_HERSHEY_SIMPLEX,
-                        1,
-                        (255, 0, 0),
-                        2,
-                    )
-                    frame = cv2.flip(frame, 1)
-                    break
-
-                left_shoulder = Point.from_landmark(pose_landmarks[12]).correct(w, h)
-                right_shoulder = Point.from_landmark(pose_landmarks[11]).correct(w, h)
-
-                if (
-                    left_shoulder.x < 0
-                    or left_shoulder.x > w
-                    or left_shoulder.y < 0
-                    or left_shoulder.y > h
-                    or right_shoulder.x < 0
-                    or right_shoulder.x > w
-                    or right_shoulder.y < 0
-                    or right_shoulder.y > h
-                ):
-                    frame = cv2.flip(frame, 1)
-                    cv2.putText(
-                        frame,
-                        "Dine skuldre skal være inden for billedet",
-                        (100, 100),
-                        cv2.FONT_HERSHEY_SIMPLEX,
-                        1,
-                        (255, 0, 0),
-                        2,
-                    )
-                    frame = cv2.flip(frame, 1)
-                    break
-
-                shoulder_dist = left_shoulder.dist(right_shoulder)
-                hand_dist = left.dist(right)
-
-                if hand_dist > shoulder_dist:
-                    frame = cv2.flip(frame, 1)
-                    cv2.putText(
-                        frame,
-                        "Dine hænder må ikke være mere end 1 skuldrelængde fra hinanden",
-                        (100, 100),
-                        cv2.FONT_HERSHEY_SIMPLEX,
-                        1,
-                        (255, 0, 0),
-                        2,
-                    )
-                    frame = cv2.flip(frame, 1)
-                    break
-
-                shoulder_mid = left_shoulder.midpoint(right_shoulder)
-
-                thingy = shoulder_dist / 10
-
-                perp = Point(
-                    -(right_shoulder.y - left_shoulder.y),
-                    right_shoulder.x - left_shoulder.x,
-                )
-                perp_unit = perp / perp.length()
-
-                chest_mid = shoulder_mid + (perp_unit * thingy)
-                cv2.circle(
-                    frame,
-                    chest_mid.as_tuple_int(),
-                    5,
-                    (255, 255, 255),
-                    cv2.FILLED,
-                )
-
-                # print(
-                #     json.dumps({"left": {"x": left.x, "y": left.y}}),
-                #     flush=True,
-                # )
-                # print(
-                #     json.dumps({"right": {"x": right.x, "y": right.y}}),
-                #     flush=True,
-                # )
-
-                mid_hands = left.midpoint(right)
-                cv2.circle(frame, mid_hands.as_tuple_int(), 5, (0, 255, 0), cv2.FILLED)
-
-                shoulder_to_shoulder = Point(
-                    right_shoulder.x - left_shoulder.x,
-                    right_shoulder.y - left_shoulder.y,
-                )
-
-                shoulder_mid_to_mid_hands = Point(
-                    shoulder_mid.x - mid_hands.x, shoulder_mid.y - mid_hands.y
-                )
-
-                angle = math.acos(
-                    shoulder_to_shoulder.dot(shoulder_mid_to_mid_hands)
-                    / (
-                        shoulder_to_shoulder.length()
-                        * shoulder_mid_to_mid_hands.length()
-                    )
-                )
-
-                shoulder_angle = math.atan2(
-                    shoulder_to_shoulder.y, shoulder_to_shoulder.x
-                )
-
-                frame = cv2.flip(frame, 1)
-                cv2.putText(
-                    frame,
-                    f"{angle}",
-                    (100, 100),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    1,
-                    (255, 0, 0),
-                    2,
-                )
-
-                cv2.putText(
-                    frame,
-                    f"Shoulder angle: {shoulder_angle}",
-                    (100, 120),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    1,
-                    (255, 0, 0),
-                    2,
-                )
-                frame = cv2.flip(frame, 1)
-
-                cv2.circle(
-                    frame,
-                    right.as_tuple_int(),
-                    5,
-                    (0, 0, 255),
-                    cv2.FILLED,
-                )
-                cv2.circle(
-                    frame,
-                    left.as_tuple_int(),
-                    5,
-                    (0, 0, 255),
-                    cv2.FILLED,
-                )
-
-        flipped = cv2.flip(frame, 1)
-
-        cv2.imshow("Capture", flipped)
-        if cv2.waitKey(1) == ord("q"):
-            break
-
-    cap.release()
-    cv2.destroyAllWindows()
+            # runs update
+            mode = update(points, mode, w, h)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        cap.release()
+        release_player()
+        overlay([command("clear")])
+        print("\nStopped")
 
 
 if __name__ == "__main__":

@@ -5,13 +5,15 @@
 #include <QMouseEvent>
 #include <QWidget>
 
-struct Item {
+struct Item
+{
     QString id;
     QJsonObject p;
     qint64 expires = 0; // ms on overlay clock, 0 = never
 };
 
-class Overlay : public QWidget {
+class Overlay : public QWidget
+{
     Q_OBJECT
 public:
     explicit Overlay(QWidget *parent = nullptr);

@@ -1,15 +1,18 @@
 [project]
 name = "skeleton-tracking"
 version = "0.1.0"
-description = "Add your description here"
+description = "Skeleton tracking controller for Getting Over It IRL"
 readme = "README.md"
 authors = [
     { name = "antoj2", email = "antonfurbojensen@gmail.com" }
 ]
-requires-python = ">=3.11"
+# mediapipe 0.10.9 only ships wheels for CPython 3.11 (Linux x86_64/aarch64, macOS, Windows x64).
+# There are none for 3.12+ or for Windows on ARM.
+requires-python = ">=3.11,<3.12"
 dependencies = [
     "mediapipe==0.10.9",
-    "opencv-python>=5.0.0.93",
+    # mediapipe already depends on opencv-contrib-python. Depending on opencv-python as well installed two packages that both provide "cv2" and overwrite each other's files. 5.x wheels need macOS 13+ (Apple Silicon) / macOS 14+ (Intel); use "opencv-contrib-python>=4.8,<5" for older macOS (untested).
+    "opencv-contrib-python>=5.0.0.93",
 ]
 
 [project.scripts]
@@ -18,4 +21,3 @@ skeleton-tracking = "skeleton_tracking:main"
 [build-system]
 requires = ["uv_build>=0.12.19,<0.13.0"]
 build-backend = "uv_build"
-

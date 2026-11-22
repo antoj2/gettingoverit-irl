@@ -1,8 +1,16 @@
 # pyright: basic
+import argparse
 import json
 import os
 import socket
+import sys
+from pathlib import Path
 from typing import Any, Self
+
+# Windows: OpenCV's default camera backend (MSMF) can take 20+ s to open a camera because it initialises hardware transforms. This must be set BEFORE cv2 is imported.
+if sys.platform == "win32":
+    os.environ.setdefault("OPENCV_VIDEOIO_MSMF_ENABLE_HW_TRANSFORMS", "0")
+
 import cv2
 import mediapipe as mp
 from mediapipe.tasks import python
@@ -30,16 +38,57 @@ Multiply game_unit with SHOULDER_DIST_TO_GAME_UNIT to get shoulder_length
 THRESHOLD_DIST = 0.08
 """The number of shoulder lengths away the hands must be from the correct position to be accepted"""
 
-# Initialize PoseLandmarker
-base_options = python.BaseOptions(
-    model_asset_path="pose_landmarker_full.task",
-)
-options = vision.PoseLandmarkerOptions(
-    base_options=base_options,
-    running_mode=vision.RunningMode.VIDEO,
-    min_pose_detection_confidence=0.8,
-    min_tracking_confidence=0.8,
-)
+# --- PoseLandmarker ---------------------------------------------------------
+MODEL_NAME = "pose_landmarker_full.task"
+
+
+def find_model() -> Path:
+    """
+    Locates the pose model independently of the current working directory.
+
+    Order: $POSE_MODEL, next to this file, the project folder (skeleton-tracking/), the repository root,
+    the current directory.
+    """
+    env = os.environ.get("POSE_MODEL")
+    if env:
+        path = Path(env).expanduser()
+        if path.is_file():
+            return path
+        raise FileNotFoundError(f"POSE_MODEL peger på en fil der ikke findes: {path}")
+
+    here = Path(__file__).resolve().parent
+    candidates = [here / MODEL_NAME]
+    candidates += [parent / MODEL_NAME for parent in here.parents[:3]]
+    candidates.append(Path.cwd() / MODEL_NAME)
+    for path in candidates:
+        if path.is_file():
+            return path
+
+    searched = "\n".join(f"  {c}" for c in candidates)
+    raise FileNotFoundError(
+        f"Kunne ikke finde {MODEL_NAME}. Jeg ledte her:\n{searched}\n"
+        "Læg filen et af de steder, eller sæt miljøvariablen POSE_MODEL til den fulde sti."
+    )
+
+
+_detector: Any = None
+
+
+def get_detector() -> Any:
+    """Creates the PoseLandmarker on first use (not at import time, so a missing model gives a readable error)."""
+    global _detector
+    if _detector is None:
+        # The model is passed as bytes, not as a path: on Windows MediaPipe can fail to open a path that contains non-ASCII characters (e.g. C:\\Users\\Søren\\...).
+        model = find_model().read_bytes()
+        _detector = vision.PoseLandmarker.create_from_options(
+            vision.PoseLandmarkerOptions(
+                base_options=python.BaseOptions(model_asset_buffer=model),
+                running_mode=vision.RunningMode.VIDEO,
+                min_pose_detection_confidence=0.8,
+                min_tracking_confidence=0.8,
+            )
+        )
+    return _detector
 
 
 # --- Classes---------------------------------------------------------------
@@ -464,35 +513,120 @@ def overlay(commands: list[dict[str, Any]]) -> None:
 
 
 # --- Camera ---------------------------------------------------------------
-def validate_camera(index: int) -> bool:
-    cap = cv2.VideoCapture(index)
-    try:
-        return cap.isOpened()
-    finally:
+_CAMERA_BACKENDS: dict[str, int] = {
+    "any": cv2.CAP_ANY,
+    "dshow": cv2.CAP_DSHOW,
+    "msmf": cv2.CAP_MSMF,
+    "avfoundation": cv2.CAP_AVFOUNDATION,
+    "v4l2": cv2.CAP_V4L2,
+}
+
+
+def _camera_backends(override: str | None = None) -> list[tuple[str, int]]:
+    """
+    The OpenCV camera backends to try, in order.
+
+    Windows: DirectShow first (opens fast), then Media Foundation. macOS: AVFoundation, then OpenCV's choice.
+    Linux: OpenCV's own choice. Override with --backend or $CAMERA_BACKEND (any, dshow, msmf, avfoundation, v4l2).
+    """
+    name = (override or os.environ.get("CAMERA_BACKEND", "")).strip().lower()
+    if name:
+        if name in _CAMERA_BACKENDS:
+            return [(name, _CAMERA_BACKENDS[name])]
+        print(f"Ukendt kamera-backend '{name}', bruger standard. Gyldige: {', '.join(_CAMERA_BACKENDS)}")
+
+    if sys.platform == "win32":
+        return [("dshow", cv2.CAP_DSHOW), ("msmf", cv2.CAP_MSMF)]
+    if sys.platform == "darwin":
+        return [("avfoundation", cv2.CAP_AVFOUNDATION), ("any", cv2.CAP_ANY)]
+    return [("any", cv2.CAP_ANY)]
+
+
+def _camera_help() -> str:
+    if sys.platform == "darwin":
+        return "Tip: Giv programmet du kører fra (Terminal, VS Code, ...) adgang under Systemindstillinger → Anonymitet og sikkerhed → Kamera, og start så programmet igen. Kamera index 0 kan være en iPhone (Continuity Camera); prøv 1 eller 2."
+    if sys.platform == "win32":
+        return "Tip: Tjek Indstillinger → Anonymitet og sikkerhed → Kamera (tillad skrivebordsapps), og at ingen anden app (Teams, Zoom, ...) bruger kameraet. Du kan også prøve --backend msmf eller dshow."
+    return "Tip: Tjek at /dev/video* findes, og at du har rettigheder til det (gruppen 'video')."
+
+
+def open_camera(
+    index: int,
+    backend: str | None = None,
+    wait: float = 5.0,
+) -> tuple[cv2.VideoCapture, cv2.typing.MatLike] | None:
+    """
+    Opens camera `index` and returns it together with a first frame, or None if no frame could be read.
+
+    Waiting for a real frame (instead of trusting isOpened()) matters on macOS and Windows: the camera can
+    report "open" while it is still starting up, or while the OS permission prompt is waiting for an answer.
+    """
+    for name, flag in _camera_backends(backend):
+        cap = cv2.VideoCapture(index, flag)
+        if not cap.isOpened():
+            cap.release()
+            continue
+        deadline = time.monotonic() + wait
+        while True:
+            ret, frame = cap.read()
+            if ret and frame is not None:
+                print(f"Kamera {index} åbnet ({name}).")
+                return cap, frame
+            if time.monotonic() >= deadline:
+                break
+            time.sleep(0.05)
         cap.release()
+    return None
 
 
-def get_camera_index() -> int:
+def choose_camera(
+    index: int | None = None, backend: str | None = None
+) -> tuple[cv2.VideoCapture, cv2.typing.MatLike] | None:
+    """
+    Opens the camera given by --camera / $CAMERA, or asks the user for an index.
+    Returns the open camera and a first frame, or None (after printing why).
+    """
+    if index is None and "CAMERA" in os.environ:
+        try:
+            index = int(os.environ["CAMERA"])
+        except ValueError:
+            print("CAMERA er ikke et rigtigt tal!")
+            return None
+
+    if index is not None:
+        cam = open_camera(index, backend)
+        if cam is None:
+            print("Det er IKKE et rigtigt kamera!")
+            print(_camera_help())
+        return cam
+
     while True:
         print("Hvilket kamera index vil du gerne bruge?")
         try:
-            idx = int(input())
+            raw = input()
+        except (EOFError, KeyboardInterrupt):
+            return None
+        try:
+            idx = int(raw)
         except ValueError:
             print("Det er ikke et rigtigt tal")
             continue
 
-        if validate_camera(idx):
-            return idx
-
-        print("Det kamera eksisterer ikke")
+        cam = open_camera(idx, backend)
+        if cam is not None:
+            return cam
+        print("Det kamera eksisterer ikke (eller kunne ikke åbnes)")
+        print(_camera_help())
 
 
 # --- Find Points ----------------------------------------------------------
 def findPoints(
     frame: cv2.typing.MatLike,
-    detector: Any = vision.PoseLandmarker.create_from_options(options),
+    detector: Any = None,
 ) -> Points | None:
     """Returns the position of relevant body markers from skeleton tracking"""
+    if detector is None:
+        detector = get_detector()
     h, w, _ = frame.shape
 
     rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
@@ -1453,27 +1587,41 @@ def update(points: Points, mode: str, w: int, h: int) -> str:
     return mode
 
 
-def main() -> None:
-    # Optains Camera
-    if "CAMERA" in os.environ:
-        try:
-            camera_env = os.environ.get("CAMERA")
-            assert camera_env is not None
-            cam_index = int(camera_env)
-            if not validate_camera(cam_index):
-                print("Det er IKKE et rigtigt kamera!")
-                return
-        except ValueError:
-            print("CAMERA er ikke et rigtigt tal!")
-            return
-    else:
-        cam_index = get_camera_index()
+MAX_READ_FAILURES = 100
+"""Consecutive failed camera reads (about 2 s) before the program gives up."""
 
-    # Optains frame
-    cap = cv2.VideoCapture(cam_index)
-    ret, frame = cap.read()
-    if not ret:
+
+def _parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(prog="skeleton-tracking")
+    parser.add_argument(
+        "-c",
+        "--camera",
+        type=int,
+        help="kamera index (alternativ til miljøvariablen CAMERA; virker i alle shells)",
+    )
+    parser.add_argument(
+        "--backend",
+        choices=sorted(_CAMERA_BACKENDS),
+        help="OpenCV kamera-backend (standard afhænger af styresystemet)",
+    )
+    return parser.parse_args()
+
+
+def main() -> None:
+    args = _parse_args()
+
+    # Loads the pose model first, so a missing model is reported before anything else happens
+    try:
+        get_detector()
+    except FileNotFoundError as e:
+        print(e)
         return
+
+    # Optains Camera and the first frame
+    cam = choose_camera(args.camera, args.backend)
+    if cam is None:
+        return
+    cap, frame = cam
     h, w, _ = frame.shape
 
     mode = "setup"
@@ -1483,12 +1631,20 @@ def main() -> None:
         print("Bruger CodeCell til at korrigere vinkler.")
 
     # Main Loop
+    failures = 0
     try:
         while cap.isOpened():
             # Optains Points from frame
             ret, frame = cap.read()
             if not ret:
+                failures += 1
+                if failures >= MAX_READ_FAILURES:
+                    print("Mistede forbindelsen til kameraet (kunne ikke læse billeder).")
+                    print(_camera_help())
+                    break
+                time.sleep(0.02)
                 continue
+            failures = 0
             points = findPoints(frame)
             if not points:
                 continue

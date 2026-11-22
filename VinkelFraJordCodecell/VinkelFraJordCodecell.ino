@@ -7,7 +7,8 @@ WiFiUDP udp;
 
 const char *ssid = "SchimonsTuffESP32v2";
 const char *password = "AntonAnton";
-const IPAddress computerIP(192, 168, 4, 2);
+// Where the data is sent. Starts as the address the CodeCell's DHCP server normally gives the first device, and is replaced by the real address of whoever sends a packet (the "hello") to `port`. That keeps it working when the computer gets another address, e.g. after reconnecting with a random Wi-Fi MAC address, or when a phone joined first.
+IPAddress computerIP(192, 168, 4, 2);
 const int port = 4210;
 
 int pickBestChannel() {
@@ -40,6 +41,7 @@ void setup() {
   WiFi.mode(WIFI_AP);
   WiFi.softAP(ssid, password, channel);
   WiFi.setSleep(false);
+  udp.begin(port);  // listen for the computer's hello
 }
 
 uint32_t lastBatteryCheck = 0;
@@ -47,6 +49,11 @@ uint8_t batteryLevel = 100;
 uint32_t nrpackage = 1;
 
 void loop() {
+  // Any packet to `port` is a hello: from now on send to where it came from (unicast, so no broadcast latency).
+  while (udp.parsePacket() > 0) {
+    computerIP = udp.remoteIP();
+  }
+
   if (myCodeCell.Run(50)) {
     if (millis() - lastBatteryCheck > 30000) {
       batteryLevel = myCodeCell.BatteryLevelRead();

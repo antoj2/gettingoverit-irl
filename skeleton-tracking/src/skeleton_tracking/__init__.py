@@ -329,8 +329,15 @@ class CodeCell:
     """Percentage charge of the CodeCell"""
 
     def __init__(self, state: list[str]) -> None:
-        self.angle = float(state[0])
-        self.charge = float(state[1])
+        # Current firmware: "sequence,millis,tilt,battery". Older firmware: "tilt,battery".
+        if len(state) >= 4:
+            self.angle = float(state[2])
+            self.charge = float(state[3])
+        elif len(state) == 2:
+            self.angle = float(state[0])
+            self.charge = float(state[1])
+        else:
+            raise ValueError(f"Ukendt CodeCell-pakke: {state!r}")
 
 
 # - Parameters -----------------------------------
@@ -1111,31 +1118,81 @@ def get_expected_handposition(rotation_point: Point, hammer_tip: Point) -> Point
 
 
 # --- CodeCell -------------------------------------------------------------
+CODECELL_SSID = "SchimonsTuffESP32v2"
+CODECELL_PORT = 4210
+CODECELL_AP_ADDR = (os.environ.get("CODECELL_IP", "192.168.4.1"), CODECELL_PORT)
+"""The CodeCell is the Wi-Fi access point; 192.168.4.1 is always its own address."""
+
 rx_codecell = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-rx_codecell.bind(("0.0.0.0", 4210))
+rx_codecell.bind(("0.0.0.0", CODECELL_PORT))
 rx_codecell.settimeout(5)
+
+# The CodeCell sends to whatever address last said hello to it (the computer's address is assigned by the CodeCell's DHCP server and is not always 192.168.4.2). Hellos go out on their own send-only socket: on Windows a UDP socket that both sends and receives can get spurious "connection reset" errors.
+_hello = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+_last_hello = float("-inf")
+
+
+def _say_hello() -> None:
+    """Tells the CodeCell where to send its data. Rate limited to once a second; never raises."""
+    global _last_hello
+    now = time.monotonic()
+    if now - _last_hello < 1.0:
+        return
+    _last_hello = now
+    try:
+        _hello.sendto(b"hello", CODECELL_AP_ADDR)
+    except OSError:
+        pass  # not connected to the CodeCell's network (yet)
+
+
+def _codecell_help() -> str:
+    tips = f"Tip: Er computeren forbundet til wifi-netværket '{CODECELL_SSID}', og er CodeCellen tændt? "
+    if sys.platform == "win32":
+        return tips + "Windows Firewall skal tillade indgående UDP på port 4210 (se VinkelFraJordCodecell/README.md); sæt gerne netværket til 'Privat'."
+    if sys.platform == "darwin":
+        return tips + "Svar Tillad hvis macOS spørger om Python må modtage indgående forbindelser, og tillad Terminal under Systemindstillinger → Anonymitet og sikkerhed → Lokalt netværk (macOS 15 og nyere)."
+    return tips + "Tjek også firewallen (UDP port 4210 ind)."
+
+
+def _parse_codecell(data: bytes) -> "CodeCell | None":
+    try:
+        return CodeCell(data.decode("utf-8").strip().split(","))
+    except (ValueError, UnicodeDecodeError):
+        return None  # not a CodeCell packet
 
 
 def codecell(time_out: float = 250) -> CodeCell | None:
     """Return the NEWEST packet: block for one, then drain everything queued behind it.
     If nothing arrives, it returns None."""
+    _say_hello()
     time_out /= 1000
-    while True:
-        rx_codecell.settimeout(time_out)
-        try:
-            last = rx_codecell.recvfrom(256)[0].decode("utf-8").strip().split(",")
-            break
-        except socket.timeout:
-            return None
+    rx_codecell.settimeout(time_out)
+    try:
+        last = _parse_codecell(rx_codecell.recvfrom(256)[0])
+    except socket.timeout:
+        return None
     rx_codecell.setblocking(False)
     try:
         while True:
-            last = rx_codecell.recvfrom(256)[0].decode("utf-8").strip().split(",")
+            newer = _parse_codecell(rx_codecell.recvfrom(256)[0])
+            if newer is not None:
+                last = newer
     except BlockingIOError:
         pass
     rx_codecell.settimeout(5)
 
-    return CodeCell(last)
+    return last
+
+
+def find_codecell(timeout: float = 3.0) -> CodeCell | None:
+    """Waits up to `timeout` seconds for the CodeCell (it needs a moment to learn the address)."""
+    deadline = time.monotonic() + timeout
+    while True:
+        cell = codecell(250)
+        if cell is not None:
+            return cell
+        if time.monotonic() >= deadline:
+            return None
 
 
 CODECELL_DEAD_ZONE = math.radians(15)
@@ -1614,9 +1671,12 @@ def main() -> None:
 
     mode = "setup"
 
-    if codecell():
+    if find_codecell():
         para.use_codecell = True
         print("Bruger CodeCell til at korrigere vinkler.")
+    else:
+        print("Ingen CodeCell fundet, kører uden den.")
+        print(_codecell_help())
 
     # Main Loop
     failures = 0

@@ -173,8 +173,6 @@ class Points:
     """Position of left shoulder in screen pixels"""
     right_shoulder: Point
     """Position of right shoulder in screen pixels"""
-    # body: Point
-    # """Position of center of the body on screen"""
 
     hands: Point
     """The average position of hands in screen pixels"""
@@ -656,22 +654,12 @@ def findPoints(
             left_shoulder = Point.from_landmark(pose_landmarks[12]).correct(w, h)
             right_shoulder = Point.from_landmark(pose_landmarks[11]).correct(w, h)
 
-            # body = average_point(
-            #     [
-            #         Point.from_landmark(pose_landmarks[11]),
-            #         Point.from_landmark(pose_landmarks[12]),
-            #         Point.from_landmark(pose_landmarks[23]),
-            #         Point.from_landmark(pose_landmarks[24]),
-            #     ]
-            # ).correct(w, h)
-
             return Points(
                 {
                     "left_hand": left_hand,
                     "right_hand": right_hand,
                     "left_shoulder": left_shoulder,
                     "right_shoulder": right_shoulder,
-                    # "body": body,
                 }
             )
 

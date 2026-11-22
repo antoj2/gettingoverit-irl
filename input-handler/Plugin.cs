@@ -6,21 +6,39 @@ using System.Net.Sockets;
 using System.Text;
 using BepInEx;
 using BepInEx.Configuration;
+using UnityEngine;
+#if IL2CPP
 using BepInEx.Unity.IL2CPP;
 using Il2CppInterop.Runtime.Injection;
-using UnityEngine;
+#else
+using BepInEx.Logging;
+#endif
 
 namespace GoiBridge
 {
+    // Build switch: the IL2CPP symbol is defined by GoiBridge.csproj for -p:Backend=Il2Cpp (Linux build).
+    // Without it this compiles as a plain BepInEx 5 / Mono plugin (Windows and macOS builds of the game).
     [BepInPlugin("dev.goibridge", "GoiBridge", "0.2.0")]
+#if IL2CPP
     public class Plugin : BasePlugin
+#else
+    public class Plugin : BaseUnityPlugin
+#endif
     {
         internal static Plugin Instance;
         internal static ConfigEntry<int> SendPort, ListenPort;
         internal static ConfigEntry<KeyCode> DumpKey;
         internal static ConfigEntry<float> PivotLocalX, PivotLocalY;
 
-        public override void Load()
+#if IL2CPP
+        public override void Load() { Init(); }
+#else
+        // BaseUnityPlugin has "Logger"; BasePlugin has "Log". Alias it so the rest of the code is identical.
+        internal ManualLogSource Log { get { return Logger; } }
+        void Awake() { Init(); }
+#endif
+
+        void Init()
         {
             Instance = this;
             SendPort = Config.Bind("Network", "SendPort", 9877, "UDP port on 127.0.0.1 the game state is sent TO.");
@@ -30,15 +48,21 @@ namespace GoiBridge
             DumpKey = Config.Bind("Debug", "DumpKey", KeyCode.F9, "Writes a state dump to BepInEx/goi_dump.txt");
 
             // No Harmony patches on purpose: they crashed the game. Everything is done from a plain component.
+#if IL2CPP
             ClassInjector.RegisterTypeInIl2Cpp<Bridge>();
             AddComponent<Bridge>();
+#else
+            gameObject.AddComponent<Bridge>();
+#endif
             Log.LogInfo("GoiBridge 0.2.0 loaded.");
         }
     }
 
     public class Bridge : MonoBehaviour
     {
+#if IL2CPP
         public Bridge(IntPtr ptr) : base(ptr) { }
+#endif
 
         enum Mode { None, World, Screen, Polar }
         Mode _mode = Mode.None;
@@ -111,8 +135,12 @@ namespace GoiBridge
             if (_sm != null) return;
             if (Time.unscaledTime < _nextSmLookup) return;
             _nextSmLookup = Time.unscaledTime + 1f;
+#if IL2CPP
             var found = UnityEngine.Object.FindObjectsOfType(Il2CppInterop.Runtime.Il2CppType.Of<SettingsManager>(), false);
             _sm = (found != null && found.Length > 0) ? found[0].TryCast<SettingsManager>() : null;
+#else
+            _sm = UnityEngine.Object.FindObjectOfType<SettingsManager>();
+#endif
             if (_sm != null) Plugin.Instance.Log.LogInfo("Found SettingsManager on '" + _sm.gameObject.name + "'");
         }
 
@@ -189,8 +217,12 @@ namespace GoiBridge
             if (_pc != null) return;
             if (Time.unscaledTime < _nextLookup) return;
             _nextLookup = Time.unscaledTime + 1f;
+#if IL2CPP
             var found = UnityEngine.Object.FindObjectsOfType(Il2CppInterop.Runtime.Il2CppType.Of<PlayerControl>(), false);
             _pc = (found != null && found.Length > 0) ? found[0].TryCast<PlayerControl>() : null;
+#else
+            _pc = UnityEngine.Object.FindObjectOfType<PlayerControl>();
+#endif
             if (_pc != null) Plugin.Instance.Log.LogInfo("Found PlayerControl on '" + _pc.gameObject.name + "'");
         }
 
@@ -243,7 +275,7 @@ namespace GoiBridge
         {
             var ray = cam.ScreenPointToRay(new Vector3(sx, sy, 0f));
             var o = ray.origin; var d = ray.direction;
-            float t = MathF.Abs(d.z) > 1e-6f ? (planeZ - o.z) / d.z : 0f;
+            float t = Fm.Abs(d.z) > 1e-6f ? (planeZ - o.z) / d.z : 0f;
             return new Vector2(o.x + d.x * t, o.y + d.y * t);
         }
 
@@ -260,8 +292,8 @@ namespace GoiBridge
             else
             {
                 var c = Pivot(_pc.hj);
-                float r = _b, th = _a * (MathF.PI / 180f);
-                w = new Vector2(c.x + r * MathF.Cos(th), c.y + r * MathF.Sin(th));
+                float r = _b, th = _a * (Fm.PI / 180f);
+                w = new Vector2(c.x + r * Fm.Cos(th), c.y + r * Fm.Sin(th));
             }
             var rb = _pc.fakeCursorRB;
             switch (_method)
@@ -319,7 +351,7 @@ namespace GoiBridge
                 var ht = _pc.hj.transform;                  // object carrying the hinge joint
                 var hp = ht.position; var q = ht.rotation;
                 sb.Append(",\"bx\":").Append(F(hp.x)).Append(",\"by\":").Append(F(hp.y));
-                sb.Append(",\"br\":").Append(F(2f * MathF.Atan2(q.z, q.w) * (180f / MathF.PI)));
+                sb.Append(",\"br\":").Append(F(2f * Fm.Atan2(q.z, q.w) * (180f / Fm.PI)));
             }
             sb.Append('}');
             var b = Encoding.ASCII.GetBytes(sb.ToString());
@@ -349,5 +381,24 @@ namespace GoiBridge
             File.WriteAllText(path, sb.ToString());
             Plugin.Instance.Log.LogInfo("Dump written to " + path);
         }
+    }
+
+    // Float math. IL2CPP build: MathF (Mathf is stripped there). Mono build: Unity 2020.3 targets
+    // .NET Standard 2.0 / 4.x, which has no MathF, so go through System.Math.
+    static class Fm
+    {
+#if IL2CPP
+        public const float PI = MathF.PI;
+        public static float Abs(float x) { return MathF.Abs(x); }
+        public static float Cos(float x) { return MathF.Cos(x); }
+        public static float Sin(float x) { return MathF.Sin(x); }
+        public static float Atan2(float y, float x) { return MathF.Atan2(y, x); }
+#else
+        public const float PI = (float)Math.PI;
+        public static float Abs(float x) { return Math.Abs(x); }
+        public static float Cos(float x) { return (float)Math.Cos(x); }
+        public static float Sin(float x) { return (float)Math.Sin(x); }
+        public static float Atan2(float y, float x) { return (float)Math.Atan2(y, x); }
+#endif
     }
 }

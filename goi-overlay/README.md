@@ -12,11 +12,23 @@ macOS: `brew install qt`, then use Apple's compiler (Homebrew's LLVM clang can b
           -DCMAKE_CXX_COMPILER=/usr/bin/clang++ -DCMAKE_OBJCXX_COMPILER=/usr/bin/clang++
     cmake --build build
 
-Linux/Windows:
+Linux:
 
     cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
     cmake --build build
     ./build/goi-overlay --demo
+
+Windows (Qt 6.5+ and Visual Studio's C++ tools or MinGW; use a "Developer PowerShell for VS" or Qt's own prompt):
+
+    cmake -S . -B build -DCMAKE_PREFIX_PATH="C:\Qt\6.8.0\msvc2022_64"
+    cmake --build build --config Release
+    build\Release\goi-overlay.exe --demo
+
+Adjust the Qt path to your installation (with MinGW or Ninja the exe is `build\goi-overlay.exe`). Visual Studio
+generators ignore `CMAKE_BUILD_TYPE`; the configuration is chosen with `--config`. After building,
+`windeployqt` is run automatically so the Qt DLLs end up next to the exe (turn off with `-DGOI_DEPLOY_QT=OFF`).
+The exe is a console program so log lines are visible; `-DGOI_OVERLAY_CONSOLE=OFF` builds it without a
+console window.
 
 Linux/Wayland needs layer-shell-qt (Debian/Ubuntu: liblayershellqtinterface-dev,
 Fedora: layer-shell-qt-devel, Arch: layer-shell-qt). Without it the overlay still
@@ -46,8 +58,8 @@ Test: echo '{"type":"text","x":.5,"y":.5,"text":"hi","align":"center"}' | nc -u 
 
 ## Platform notes
 
-- Windows: topmost + WS_EX_TRANSPARENT, re-asserted every second. Works over windowed
-  and borderless-fullscreen. It CANNOT draw over _exclusive_ fullscreen (DirectX owns
+- Windows: topmost + WS*EX_TRANSPARENT, re-asserted every second. Works over windowed
+  and borderless-fullscreen. It CANNOT draw over \_exclusive* fullscreen (DirectX owns
   the screen) - run the game in windowed/borderless mode.
 - macOS: window level above the menu bar, joins all Spaces, accessory app, so it appears
   over native fullscreen games. Grant nothing special; no permissions needed.

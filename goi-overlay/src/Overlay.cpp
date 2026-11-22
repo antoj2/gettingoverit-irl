@@ -3,6 +3,7 @@
 #include <QPainter>
 #include <QPainterPath>
 #include <QTimer>
+#include <algorithm>
 #include <cmath>
 
 Overlay::Overlay(QWidget *parent) : QWidget(parent)
